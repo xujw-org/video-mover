@@ -8,7 +8,7 @@ import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, List, Dict
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from functools import lru_cache
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -27,6 +27,15 @@ if os.name == 'nt':
         win32api = None
 else:
     win32api = None
+
+# Windows 控制台默认编码是 cp936（charmap），直接输出中文以外的符号
+#（如 U+2705 这类 emoji）会抛 UnicodeEncodeError。启动时尽量把 stdout/stderr 重设为
+# UTF-8（失败时静默跳过，不影响主流程），让日志在 Windows 上也不崩。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # 模块级导出定义
 __all__ = ['AppConfig', 'HandlerBase', 'TaskPlugin', 'FileManager', 'FlushHandler', 
@@ -210,6 +219,11 @@ class AppConfig:
         self.TIMEZONE = str(self._get(schedule, "timezone", "TIMEZONE", defaults["schedule"]["timezone"]))
         try:
             ZoneInfo(self.TIMEZONE)
+        except ZoneInfoNotFoundError:
+            raise ValueError(
+                f"无效时区: {self.TIMEZONE!r}，请使用合法的 IANA 时区名，例如 Asia/Shanghai。"
+                f"在 Windows 上 Python 自身不带 IANA 时区数据库，请先 pip install tzdata==2026.6 再运行"
+            )
         except Exception:
             raise ValueError(f"无效时区: {self.TIMEZONE!r}，请使用合法的 IANA 时区名，例如 Asia/Shanghai")
 
@@ -392,7 +406,7 @@ class FlushHandler(HandlerBase):
         process.wait()
         success = process.returncode == 0
         if success:
-            logging.info("✅ 刷新脚本执行成功")
+            logging.info("刷新脚本执行成功")
         else:
             logging.error(f"刷新脚本执行失败，返回码: {process.returncode}")
         logging.info(f"\n{'='*35}\n刷新脚本执行结束 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -461,7 +475,7 @@ class UploadHandler(HandlerBase):
         process.wait()
         success = process.returncode == 0
         if success:
-            logging.info("✅ 上传脚本执行成功")
+            logging.info("上传脚本执行成功")
         else:
             logging.error(f"上传脚本执行失败，返回码: {process.returncode}")
         logging.info(f"\n{'='*35}\n上传脚本执行结束 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")

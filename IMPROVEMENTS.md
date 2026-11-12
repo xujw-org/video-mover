@@ -5,6 +5,28 @@
 **xujw-org/video-mover**。本次只做了下面三组优先改进，没有重构业务逻辑，
 没有改动视频处理与上传流程本身。
 
+## CI Windows 修复之二：tzdata 与控制台编码（2026-11-12）
+
+第二次 CI 运行：Ubuntu 全过，windows-smoke 在测试阶段失败，
+13 failed、89 passed、5 errors。主因是 Windows 的 Python 3.12
+自身不带 IANA 时区数据库，`AppConfig` 用 `ZoneInfo('Asia/Shanghai')`
+校验时抛 `ZoneInfoNotFoundError`（随后是 `ModuleNotFoundError:
+No module named 'tzdata'`），大量用 Asia/Shanghai / Europe/London
+的测试连带失败；Ubuntu 因系统自带时区库而通过。
+
+修复：
+- `requirements.txt` 和 `requirements-dev.txt` 都加了 `tzdata==2026.6`
+ （CI 只装后者，所以两边都要加）。Linux/macOS 自带系统时区库，
+  装上也无害。
+- 时区校验的报错分开了：找不到时区数据时提示 Windows 用户先
+  `pip install tzdata`，而不是只说名字非法。
+- 次因是 `main.py` 日志里有 ✅（U+2705），Windows 控制台默认编码是
+  cp936（charmap），输出它会抛 `UnicodeEncodeError`。已把两处 ✅
+  从日志里去掉，并在启动时把 stdout/stderr 重设为 UTF-8
+ （errors='replace'，失败时静默跳过）。
+- 新增回归测试 `tests/test_tzdata_and_encoding.py`（5 个），测试总数
+  107 -> 112，全部通过。
+
 ## CI Windows 修复（2026-11-12）
 
 CI 首次运行：Ubuntu 的 test 任务全过，Windows 的 windows-smoke

@@ -5,6 +5,9 @@
 #
 # 注意：
 # - pywin32 仅 Windows 需要，已加 sys_platform 标记，Linux / macOS 下 pip 会自动跳过。
+# - tzdata：Windows 上 Python 自身不带 IANA 时区数据库，ZoneInfo('Asia/Shanghai')
+#   这类调用会抛 ZoneInfoNotFoundError；装上 tzdata 后 Windows 也能用。
+#   Linux/macOS 自带系统时区库，装上也无害。
 # - eventlet / schedule / cf_clearance / openai 在当前仓库代码中无直接引用，
 #   疑似历史遗留或上游传递依赖，本次仅做版本锁定，暂不删除，后续可评估移除。
 # - ffmpeg-python、opencc-python-reimplemented、pysrt、pydub 的上游元数据未声明
@@ -23,6 +26,7 @@ loguru==0.8.0
 apscheduler==3.11.3
 f2==0.0.1.7
 pywin32==312; sys_platform == "win32"
+tzdata==2026.6
 ruamel.yaml==0.19.1
 opencv-python==5.0.0.93
 ffmpeg-python==0.2.0

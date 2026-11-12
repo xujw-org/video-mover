@@ -8,8 +8,12 @@
 # pywin32：main.py 在 Windows 上 import 时会尝试导入 win32api（已改为
 # 缺失时降级为 None，不再硬性要求），但为了在 Windows CI 上也覆盖真实
 # 导入路径，测试依赖里仍显式装上它；Linux/macOS 下标记会跳过。
+# tzdata：AppConfig 用 ZoneInfo 校验时区，Windows 上没有它会抛
+# ZoneInfoNotFoundError；测试里大量用 Asia/Shanghai / Europe/London，
+# 所以测试依赖里也要装，版本与 requirements.txt 一致。
 pytest==9.2.0
 pyyaml==6.0.3
 numpy==2.5.4
 Pillow==13.0.0
 pywin32==312; sys_platform == "win32"
+tzdata==2026.6
