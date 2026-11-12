@@ -5,6 +5,28 @@
 **xujw-org/video-mover**。本次只做了下面三组优先改进，没有重构业务逻辑，
 没有改动视频处理与上传流程本身。
 
+## CI Windows 修复（2026-11-12）
+
+CI 首次运行：Ubuntu 的 test 任务全过，Windows 的 windows-smoke
+在收集阶段失败，`main.py:21: import win32api` 在没装 pywin32 的
+Windows 上抛 `ModuleNotFoundError: No module named 'win32api'`，
+`tests/test_appconfig.py` 和 `tests/test_filemanager.py` 无法收集。
+
+根因：`win32api` 只在 `SchedulerManager._register_signals`
+（Windows 调度器运行时）真正用到，却在模块顶层无条件导入；
+而 CI 的 windows-smoke 只装 `requirements-dev.txt`，里面原来
+没有 pywin32。Ubuntu 因 `os.name != 'nt'` 跳过这行才通过。
+
+修复（两处，缺一不可的思路是“导入不再硬依赖，CI 也装上真包”）：
+- `main.py`：win32api 改为 try/except 导入，缺失时为 None；
+  `_register_signals` 在为 None 时只打警告，不调用。
+  这样 import main 不再硬性依赖 pywin32。
+- `requirements-dev.txt`：加 `pywin32==312; sys_platform == "win32"`，
+  Windows CI 会装上真包，覆盖真实导入路径；Linux/macOS 跳过。
+- 新增回归测试 `tests/test_win32api_guard.py`（2 个）：
+  模拟 Windows 且未装 pywin32 时 reload main 不抛错、
+  `_register_signals` 不崩。测试总数 105 -> 107，全部通过。
+
 ## 第二批改进（2026-11-12）：测试、CI 与 Dedup 拆分
 
 在第一批（依赖锁定、清理、配置抽离）基础上，本批做了三件事：

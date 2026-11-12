@@ -18,7 +18,15 @@ from watchdog.events import FileSystemEventHandler
 from logging.handlers import RotatingFileHandler
 
 if os.name == 'nt':
-    import win32api
+    try:
+        import win32api
+    except ImportError:
+        # pywin32 未安装时也能 import main（如测试、配置解析）。
+        # 只有调度器在 Windows 上注册控制台信号时才真正需要它，
+        # 见 SchedulerManager._register_signals 的降级处理。
+        win32api = None
+else:
+    win32api = None
 
 # 模块级导出定义
 __all__ = ['AppConfig', 'HandlerBase', 'TaskPlugin', 'FileManager', 'FlushHandler', 
@@ -546,7 +554,10 @@ class SchedulerManager:
             
     def _register_signals(self) -> None:
         if os.name == 'nt':
-            win32api.SetConsoleCtrlHandler(self._windows_signal_handler, True)
+            if win32api is not None:
+                win32api.SetConsoleCtrlHandler(self._windows_signal_handler, True)
+            else:
+                logging.warning("pywin32 未安装，Windows 控制信号处理不可用；请 pip install pywin32==312")
         else:
             signal.signal(signal.SIGINT, self._signal_handler)
             signal.signal(signal.SIGTERM, self._signal_handler)
