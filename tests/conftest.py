@@ -61,11 +61,14 @@ def _make_fake_cv2():
     cv2.COLOR_RGB2BGR = 5
     cv2.COLOR_BGR2HSV = 40
     cv2.COLOR_HSV2BGR = 55
+    cv2.COLOR_RGB2HSV = 41
+    cv2.COLOR_HSV2RGB = 56
     cv2.COLOR_GRAY2BGR = 8
     cv2.CAP_PROP_FRAME_COUNT = 1
     cv2.CAP_PROP_POS_FRAMES = 2
     cv2.CAP_PROP_FPS = 5
     cv2.INTER_AREA = 3
+    cv2.INTER_LINEAR = 1
 
     def cvtColor(frame, code):  # BGR<->RGB 只换通道，其余转换原样返回
         if code in (cv2.COLOR_BGR2RGB, cv2.COLOR_RGB2BGR):
@@ -214,6 +217,11 @@ class _FakeStream:
 
     def output(self, *args, **kwargs):
         self._mod.calls.append(("output", args, kwargs))
+        return self
+
+    def filter(self, name, *args, **kwargs):
+        # 与 ffmpeg-python 的 Stream.filter 同名：只记录，不做真实滤镜。
+        self._mod.calls.append(("filter", (name,) + args, kwargs))
         return self
 
     def overwrite_output(self):

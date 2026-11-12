@@ -46,10 +46,12 @@ Dedup/
   -> 字幕：时长 > subtitles_duration 且 include_subtitles 时，
      use_whisper 则 Whisper 生成，否则读 subtitles_file；pysrt 加载
   -> 音频：ffmpeg 抽 wav -> remove_silence（可选）-> mix_bgm（可选）
+     -> 音频多样化（第 3 步）：volume 音量、asetrate 变调、atempo 变速
   -> 帧：enable_frame_swap 时用 swapped_frame_generator（交换相邻帧），
      否则用 _frame_generator；分批（batch_size）+ ThreadPoolExecutor(4) 并行
   -> _process_single_frame（单帧处理链，顺序固定，见下）
-  -> _write_frames：ffmpeg pipe rawvideo -> libx264 + aac，preset fast，crf 23，b:v 2M
+  -> _write_frames：ffmpeg pipe rawvideo -> libx264 + aac，preset fast，crf 23，b:v 2M；
+     输出帧率 = 原帧率 × playback_speed（第 2 步），帧数不变，时长随之变化
 ```
 
 单帧处理链顺序（`_process_single_frame`，不要轻易调换）：
@@ -58,19 +60,30 @@ Dedup/
 2. 水平镜像（`flip_horizontal`）
 3. `rotate_frame` 旋转
 4. 按 `crop_percentage` 裁剪，再缩放回原始尺寸
-5. `adjust_sbc` 饱和度 / 亮度 / 对比度
-6. `add_watermark` 水印（`include_watermark`）
-7. `add_subtitles` 字幕（`include_subtitles` 且字幕已加载）
-8. `add_titles` 顶部 / 底部标题（`include_titles`）
-9. `add_hzh_effect` 画中画
-10. `color_shift` 颜色偏移
-11. `blur_background` 背景模糊
-12. `scramble_phase` 频域扰乱
-13. `add_texture_noise` 纹理噪声
-14. `apply_edge_blur` 边缘模糊
-15. `apply_gaussian_blur` 高斯模糊（按帧步长）
-16. `apply_fade_effect` 淡入淡出
-17. RGB -> BGR 返回
+5. `apply_zoom` 轻微缩放：先放大再居中裁回原尺寸（第 2 步新增）
+6. `adjust_sbc` 饱和度 / 亮度 / 对比度
+7. `apply_hue_shift` 色相偏移（第 2 步新增）
+8. `add_watermark` 水印（`include_watermark`）
+9. `add_subtitles` 字幕（`include_subtitles` 且字幕已加载）
+10. `add_titles` 顶部 / 底部标题（`include_titles`）
+11. `add_hzh_effect` 画中画
+12. `color_shift` 颜色偏移
+13. `blur_background` 背景模糊
+14. `scramble_phase` 频域扰乱
+15. `add_texture_noise` 纹理噪声
+16. `apply_edge_blur` 边缘模糊
+17. `apply_gaussian_blur` 高斯模糊（按帧步长）
+18. `apply_fade_effect` 淡入淡出
+19. RGB -> BGR 返回
+
+播放速度与音画同步（第 2、3 步）：`playback_speed` 只改输出帧率
+（`_write_frames` 用 `原帧率 × 速度`），字幕仍按原时间查
+（`_process_frames` 拿原帧率），否则字幕会整体漂移；音频用
+`atempo` 同步变速，时长与视频新时长一致。变调时先用
+`asetrate(sr×pitch) + aresample(sr)` 改音调，再用
+`atempo(speed/pitch)` 把时长补回与速度一致；拿不到采样率时
+跳过变调、只变速。以上音频处理集中在
+`VideoHandler._apply_audio_effects()`，无音频流时返回 None。
 
 ## main.py 是怎么调它的
 
@@ -111,6 +124,23 @@ config = VideoConfig()
 config.include_subtitles = False
 VideoHandler(config).process_video("input.mp4", "output.mp4")
 ```
+
+## 每视频随机参数（2026-11-12）
+
+默认不再用固定参数：CLI 每次按输入文件名派生种子（`VideoConfig.randomized_for()`），
+从安全范围里抽一套参数——旋转 ±6°、裁剪 5–20%、饱和度/对比度 0.90–1.15、
+亮度 −0.10–0.15、帧交换间隔 5/8/10/12/15/20、水印透明度、背景音乐音量等，
+25% 概率镜像、30% 概率开纹理噪声、20% 概率开轻频域扰乱。同一文件名重跑得到
+同一套参数（可复现），不同视频参数组合不同。`--seed N` 指定种子，
+`--no-randomize` 恢复原来的固定默认值。`VideoConfig()` 的默认值本身没变。
+
+第 2 步（2026-11-12）：在随机参数里加了播放速度 0.95–1.05、色相偏移
+±10°、缩放 1.02–1.08。速度只改输出帧率与音频 tempo，时长随之变化，
+音画同步不变（见上）；色相和缩放都是肉眼几乎看不出、但逐像素指纹会变的量。
+
+第 3 步（2026-11-12）：音频也按视频随机：主音频音量 0.90–1.10、
+音调 0.98–1.02（asetrate+aresample 变调，atempo 把时长补回与速度一致；
+拿不到采样率时跳过变调）。BGM 音量已在第 1 步里随机（0.05–0.15）。
 
 注意：`VideoConfig` 的默认值要求水印图、画中画视频等资产存在，
 先执行 `python scripts/download_assets.py`，或把对应开关关掉。

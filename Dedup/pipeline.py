@@ -117,6 +117,16 @@ class VideoHandler:
             # 获取视频时长并根据 subtitles_duration 决定是否加载字幕
             probe = ffmpeg.probe(input_path)
             duration = float(probe['format']['duration'])
+            # 音频采样率：变调（asetrate）需要它，拿不到就跳过变调只变速。
+            audio_sample_rate = None
+            audio_info = next(
+                (s for s in probe.get('streams', [])
+                 if s.get('codec_type') == 'audio'), None)
+            if audio_info and audio_info.get('sample_rate'):
+                try:
+                    audio_sample_rate = int(audio_info['sample_rate'])
+                except (TypeError, ValueError):
+                    audio_sample_rate = None
             if self.config.include_subtitles and duration > self.config.subtitles_duration:
                 if self.config.use_whisper:
                     subtitles_file = SubtitleHandler.generate_subtitles(input_path, self.config.whisper_model_name)
@@ -148,6 +158,11 @@ class VideoHandler:
                     audio_stream = ffmpeg.input(mixed_audio_path)
                 else:
                     audio_stream = ffmpeg.input(processed_audio_path)
+
+            # 第 3 步：音频多样化（音量 / 变调 / 变速），见 _apply_audio_effects。
+            # 无音频流时原样返回 None；变速后音频时长与视频新时长一致。
+            audio_stream = self._apply_audio_effects(
+                audio_stream, self.config, audio_sample_rate)
 
             # 定义帧交换索引映射函数
             def get_original_idx(output_idx, interval, total_frames):
@@ -181,14 +196,50 @@ class VideoHandler:
                 frame_generator = self._frame_generator(cap)
 
             # 分批处理视频帧
+            # 第 2 步：播放速度。输出帧率 = 原帧率 × 速度，帧数不变，
+            # 所以输出时长 = 原时长 / 速度；音频已用 atempo 同步变速，
+            # 音画同步不变。字幕按原时间查（_process_frames 仍传原 fps），
+            # 否则字幕会整体漂移；只有写帧时用新帧率。
+            out_fps = fps * self.config.playback_speed
             processed_frame_generator = self._process_frames(frame_generator, total_frames, fps, height, width)
-            self._write_frames(processed_frame_generator, output_path, width, height, fps, audio_stream)
+            self._write_frames(processed_frame_generator, output_path, width, height, out_fps, audio_stream)
 
         finally:
             cap.release()
             for temp_file in temp_files:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
+
+    @staticmethod
+    def _apply_audio_effects(audio_stream, config: VideoConfig,
+                             sample_rate=None):
+        """第 3 步：给最终音频流加音量 / 变调 / 变速（ffmpeg 滤镜）。
+
+        顺序与算术（保证时长只跟速度走、音调只跟 pitch 走）：
+        1. volume：主音频音量倍率；
+        2. asetrate(sr*pitch) + aresample(sr)：音调变 pitch 倍，
+           时长变为原来的 1/pitch（需要采样率，拿不到就跳过变调）；
+        3. atempo(speed/pitch)：把时长从 1/pitch 补到 1/speed，
+           与视频新时长（原时长 / speed）一致，音调不受 atempo 影响。
+        pitch 为 1.0 时第 2 步跳过，atempo 因子就是 speed。
+        无音频流时返回 None；全部为默认值时返回原流，不加任何滤镜。
+        """
+        if audio_stream is None:
+            return None
+        stream = audio_stream
+        if config.audio_volume != 1.0:
+            stream = stream.filter('volume', config.audio_volume)
+        pitch_applied = False
+        if config.pitch_shift != 1.0 and sample_rate:
+            new_rate = int(sample_rate * config.pitch_shift)
+            stream = stream.filter('asetrate', new_rate)
+            stream = stream.filter('aresample', int(sample_rate))
+            pitch_applied = True
+        tempo = config.playback_speed / config.pitch_shift if pitch_applied \
+            else config.playback_speed
+        if tempo != 1.0:
+            stream = stream.filter('atempo', round(tempo, 4))
+        return stream
 
     def _frame_generator(self, cap: cv2.VideoCapture) -> Generator[Tuple[int, np.ndarray], None, None]:
         """
@@ -290,7 +341,9 @@ class VideoHandler:
         if frame.shape[0] != orig_height or frame.shape[1] != orig_width:
             frame = cv2.resize(frame, (orig_width, orig_height), interpolation=cv2.INTER_AREA)
         
+        frame = VideoEffects.apply_zoom(frame, config)
         frame = VideoEffects.adjust_sbc(frame, config)
+        frame = VideoEffects.apply_hue_shift(frame, config)
         if config.include_watermark:
             frame = VideoEffects.add_watermark(frame, config, frame_idx, total_frames, self)  # 传递 self
         if self.config.include_subtitles and self.subs:

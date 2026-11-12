@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import random
 import sys
 
 # GitHub Windows runner 是美区系统，stdio 默认编码是 cp1252（charmap），
@@ -77,8 +78,40 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="python dedup.py -i input.mp4 -o output.mp4")
     parser.add_argument("-i", "--input", required=True, help="输入视频文件路径")
     parser.add_argument("-o", "--output", required=True, help="输出视频文件路径")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="随机参数种子：指定后按该种子抽取参数（可复现）；不指定则按输入文件名派生")
+    parser.add_argument("--no-randomize", action="store_true",
+                        help="关闭每视频随机参数，恢复原来的固定默认值")
     args = parser.parse_args(argv)
-    config = VideoConfig()
+    if args.no_randomize:
+        config = VideoConfig()
+    elif args.seed is not None:
+        config = VideoConfig.randomized(args.seed)
+    else:
+        config = VideoConfig.randomized_for(args.input)
+    # 逐帧特效也用全局 random / np.random（水印位置、颜色偏移、纹理噪声、
+    # 频域扰乱），按同一粒种子播种，使同一输入的随机流可复现。
+    # 注意：pipeline 用线程池并行处理帧，帧间随机调用的先后顺序仍可能变化，
+    # 所以可复现的保证只到“参数组合”一层，不保证逐帧比特级相同。
+    if config.random_seed is not None:
+        random.seed(config.random_seed)
+        try:
+            import numpy as np
+
+            np.random.seed(config.random_seed % (2 ** 32))
+        except ImportError:
+            pass
+    logging.info(
+        "随机参数 seed=%s：旋转 %s°、裁剪 %s、饱和度 %s、亮度 %s、对比度 %s、"
+        "帧交换间隔 %s、镜像 %s、水印透明度 %s、BGM 音量 %s、"
+        "速度 %s、色相 %s°、缩放 %s、主音频音量 %s、音调 %s",
+        config.random_seed, config.rotation_angle, config.crop_percentage,
+        config.saturation, config.brightness, config.contrast,
+        config.frame_swap_interval, config.flip_horizontal,
+        config.watermark_opacity, config.background_music_volume,
+        config.playback_speed, config.hue_shift, config.zoom_factor,
+        config.audio_volume, config.pitch_shift,
+    )
     processor = VideoHandler(config)
     processor.process_video(args.input, args.output)
 

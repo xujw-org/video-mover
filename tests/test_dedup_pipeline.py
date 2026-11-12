@@ -115,7 +115,8 @@ def test_single_frame_chain_order_all_enabled(tmp_path, monkeypatch):
             return args[0]
         return _fake
 
-    for name in ("rotate_frame", "adjust_sbc", "add_watermark", "add_subtitles",
+    for name in ("rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+                 "add_watermark", "add_subtitles",
                  "add_titles", "add_hzh_effect", "color_shift", "blur_background",
                  "scramble_phase", "add_texture_noise", "apply_edge_blur",
                  "apply_gaussian_blur", "apply_fade_effect"):
@@ -123,7 +124,8 @@ def test_single_frame_chain_order_all_enabled(tmp_path, monkeypatch):
 
     handler._process_single_frame(_frame(100), 10, config, 30.0, 100, 48, 64)
     assert calls == [
-        "rotate_frame", "adjust_sbc", "add_watermark", "add_subtitles", "add_titles",
+        "rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+        "add_watermark", "add_subtitles", "add_titles",
         "add_hzh_effect", "color_shift", "blur_background", "scramble_phase",
         "add_texture_noise", "apply_edge_blur", "apply_gaussian_blur", "apply_fade_effect",
     ]
@@ -140,16 +142,19 @@ def test_single_frame_chain_order_all_disabled(tmp_path, monkeypatch):
             return args[0]
         return _fake
 
-    for name in ("rotate_frame", "adjust_sbc", "add_watermark", "add_subtitles",
+    for name in ("rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+                 "add_watermark", "add_subtitles",
                  "add_titles", "add_hzh_effect", "color_shift", "blur_background",
                  "scramble_phase", "add_texture_noise", "apply_edge_blur",
                  "apply_gaussian_blur", "apply_fade_effect"):
         monkeypatch.setattr(VideoEffects, name, staticmethod(recorder(name)))
 
     handler._process_single_frame(_frame(100), 10, config, 30.0, 100, 48, 64)
-    # 全部开关关闭时，只剩无条件执行的 10 步。
+    # 全部开关关闭时，只剩无条件执行的 12 步（zoom / hue 为 1.0 / 0 时原样返回，
+    # 但仍会调用）。
     assert calls == [
-        "rotate_frame", "adjust_sbc", "add_hzh_effect", "color_shift", "blur_background",
+        "rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+        "add_hzh_effect", "color_shift", "blur_background",
         "scramble_phase", "add_texture_noise", "apply_edge_blur",
         "apply_gaussian_blur", "apply_fade_effect",
     ]

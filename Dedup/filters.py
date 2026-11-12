@@ -397,6 +397,58 @@ class VideoEffects:
         return frame
 
     @staticmethod
+    def apply_hue_shift(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
+        """
+        对视频帧应用色相偏移（第 2 步新增）。
+
+        链路里走到这里时帧是 RGB，先转 HSV，把 H 通道整体平移再转回来。
+        OpenCV 的 H 通道是 0-179（对应 0-360°），所以 1° = 0.5 个单位。
+        hue_shift 为 0 时原样返回。
+
+        参数:
+            frame: 当前视频帧（RGB）
+            config: 视频处理配置对象
+
+        返回:
+            np.ndarray: 应用色相偏移后的帧
+        """
+        if not config.hue_shift:
+            return frame
+        delta = int(round(config.hue_shift / 2))
+        if delta == 0:
+            return frame
+        hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
+        hsv[:, :, 0] = (hsv[:, :, 0].astype(np.int16) + delta) % 180
+        return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+
+    @staticmethod
+    def apply_zoom(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
+        """
+        对视频帧应用轻微缩放（第 2 步新增）。
+
+        先把帧放大 zoom_factor 倍，再居中裁回原尺寸：画面内容整体
+        外扩一圈，每像素的位置都变了，但构图几乎看不出差别。
+        zoom_factor <= 1.0 时原样返回。
+
+        参数:
+            frame: 当前视频帧
+            config: 视频处理配置对象
+
+        返回:
+            np.ndarray: 应用缩放后的帧（尺寸与输入相同）
+        """
+        if not config.zoom_factor or config.zoom_factor <= 1.0:
+            return frame
+        h, w = frame.shape[:2]
+        new_h, new_w = int(h * config.zoom_factor), int(w * config.zoom_factor)
+        if new_h <= h or new_w <= w:
+            return frame
+        enlarged = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        top = (new_h - h) // 2
+        left = (new_w - w) // 2
+        return enlarged[top:top + h, left:left + w].copy()
+
+    @staticmethod
     def blur_background(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
         """
         对视频帧的背景应用模糊效果。

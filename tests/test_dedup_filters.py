@@ -120,6 +120,43 @@ def test_color_shift_moves_blue_up_and_green_down(tmp_path):
     assert int(out[0, 0, 1]) == 100 - shift  # G 通道反向移动同样幅度
 
 
+def test_hue_shift_zero_returns_same_frame(tmp_path):
+    config = _passing_video_config(tmp_path)
+    config.hue_shift = 0
+    frame = _frame()
+    assert np.array_equal(VideoEffects.apply_hue_shift(frame, config), frame)
+
+
+def test_hue_shift_moves_hue_channel(tmp_path):
+    config = _passing_video_config(tmp_path)
+    config.hue_shift = 10
+    frame = _frame(100)
+    out = VideoEffects.apply_hue_shift(frame, config)
+    assert out.shape == frame.shape and out.dtype == np.uint8
+    # 替身 cv2 的 HSV 转换是恒等函数，H 通道就是第 0 通道：
+    # 10° 对应 OpenCV 的 5 个单位，100 -> 105，其余通道不动。
+    assert int(out[0, 0, 0]) == 105
+    assert int(out[0, 0, 1]) == 100
+
+
+def test_zoom_one_returns_same_frame(tmp_path):
+    config = _passing_video_config(tmp_path)
+    config.zoom_factor = 1.0
+    frame = _frame()
+    assert np.array_equal(VideoEffects.apply_zoom(frame, config), frame)
+
+
+def test_zoom_enlarges_then_crops_back_to_same_shape(tmp_path):
+    config = _passing_video_config(tmp_path)
+    config.zoom_factor = 1.08
+    # 横向渐变帧：放大再居中裁回后，内容必然变化，尺寸保持不变。
+    base = np.tile(np.arange(64, dtype=np.uint8), (48, 1))
+    frame = np.stack([base, base, base], axis=-1)
+    out = VideoEffects.apply_zoom(frame, config)
+    assert out.shape == frame.shape
+    assert not np.array_equal(out, frame)
+
+
 def test_gaussian_blur_applies_only_on_interval_frames(tmp_path):
     config = _passing_video_config(tmp_path)
     config.gaussian_blur_interval = 15

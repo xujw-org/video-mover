@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import random
 import re
 
 
@@ -15,6 +17,10 @@ class VideoConfig:
     视频配置类，用于管理音频、视频特效、字幕等参数。
     """
     def __init__(self):
+        # 随机化种子：None 表示使用固定默认值；randomized() / randomized_for()
+        # 会填入一个整数种子，同一输入重跑得到同一套参数，不同输入得到不同参数。
+        self.random_seed = None
+
         # GPU加速
         self.enable_gpu: bool = False  # 是否启用 GPU 加速
 
@@ -87,6 +93,17 @@ class VideoConfig:
         self.brightness: float = 0.05        # 亮度调整因子，建议 -0.3 到 0.3。负值降低亮度，正值增加亮度。
         self.contrast: float = 1.05          # 对比度调整因子，建议 0.8-1.2。值越小对比度越低，值越大对比度越高。
 
+        # 播放速度与色相、缩放（第 2 步新增，2026-11-12）
+        self.playback_speed: float = 1.0     # 播放速度倍率，1.0 表示原速；输出帧率 = 原帧率 × 该值，
+                                             # 音频用 atempo 同步变速，音画同步不变；建议 0.95-1.05。
+        self.hue_shift: int = 0              # 色相偏移（度），范围 -30 到 30；0 表示不偏移。
+        self.zoom_factor: float = 1.0        # 轻微缩放因子，1.0 表示不缩放；>1 时先放大再居中裁回原尺寸。
+
+        # 音频多样化（第 3 步新增，2026-11-12）
+        self.audio_volume: float = 1.0       # 主音频音量倍率，1.0 表示原音量；建议 0.9-1.1。
+        self.pitch_shift: float = 1.0        # 音调偏移倍率，1.0 表示原调；用 asetrate+aresample 实现，
+                                             # 再用 atempo 把时长补回与速度一致；建议 0.98-1.02。
+
         # 背景模糊
         self.blur_background_enabled: bool = True           # 是否启用背景模糊
         self.top_blur_percentage: int = 3                   # 顶部模糊区域百分比，范围 0-100。
@@ -111,6 +128,73 @@ class VideoConfig:
         self.enable_texture_noise: bool = False             # 是否启用纹理噪声
         self.texture_noise_strength: float = 0.5            # 纹理噪声强度，范围 0-1，默认 0.5
         self.enable_blur_edge: bool = True                  # 是否启用边缘模糊
+
+    # 每视频随机参数的取值范围（2026-11-12，针对“固定参数易判重”）。
+    # 全部落在 validate() 允许的范围内，且不超出各参数注释里的建议区间，
+    # 画质风险可控：旋转 ±6°、裁剪 5–20%、饱和度/对比度 ±15%、亮度 ±0.15。
+    # 镜像（flip_horizontal）和频域扰乱（scramble_frequency）只按概率开启，
+    # 前者会左右翻转画面内文字，后者处理时间较长，见 randomized() 的注释。
+    @classmethod
+    def randomized(cls, seed=None):
+        """返回一套按种子随机抽取的参数。
+
+        同一种子 → 同一套参数（可复现）；不同种子 → 参数组合不同。
+        不传 seed 时用系统熵，每次运行都不同。默认值 VideoConfig() 不变，
+        仍是固定参数，供 --no-randomize 与旧调用方式使用。
+        """
+        rng = random.Random(seed)
+        config = cls()
+        config.random_seed = seed
+        config.rotation_angle = rng.randint(-6, 6)
+        config.crop_percentage = round(rng.uniform(0.05, 0.20), 3)
+        config.saturation = round(rng.uniform(0.90, 1.15), 3)
+        config.brightness = round(rng.uniform(-0.10, 0.15), 3)
+        config.contrast = round(rng.uniform(0.90, 1.15), 3)
+        config.frame_swap_interval = rng.choice([5, 8, 10, 12, 15, 20])
+        config.gaussian_blur_interval = rng.choice([0, 10, 15, 20])
+        config.gaussian_blur_kernel_size = rng.choice([3, 5])
+        config.gaussian_blur_area_percentage = rng.randint(10, 20)
+        config.watermark_opacity = round(rng.uniform(0.04, 0.10), 3)
+        config.background_music_volume = round(rng.uniform(0.05, 0.15), 3)
+        # 25% 概率镜像：对指纹扰动大，但会翻转画面内原有文字，默认不开满。
+        config.flip_horizontal = rng.random() < 0.25
+        config.fade_in_frames = rng.randint(5, 15)
+        config.fade_out_frames = rng.randint(10, 30)
+        config.color_shift_range = rng.randint(2, 5)
+        config.enable_texture_noise = rng.random() < 0.30
+        config.texture_noise_strength = round(rng.uniform(0.3, 0.7), 2)
+        # 20% 概率开频域扰乱：0.05–0.20 的轻扰动，处理时间明显变长。
+        config.scramble_frequency = (
+            round(rng.uniform(0.05, 0.20), 2) if rng.random() < 0.20 else 0.0
+        )
+        config.hzh_opacity = round(rng.uniform(0.05, 0.15), 3)
+        config.hzh_scale = round(rng.uniform(0.8, 1.0), 2)
+        config.top_blur_percentage = rng.randint(2, 5)
+        config.bottom_blur_percentage = rng.randint(2, 5)
+        config.side_blur_percentage = rng.randint(2, 5)
+        # 第 2 步：播放速度、色相、缩放。速度只在 ±5% 内浮动，避免可感知的
+        # 快慢与口型错位；色相 ±10°、缩放 1.02–1.08，都是肉眼几乎看不出、
+        # 但逐像素指纹会变的量。
+        config.playback_speed = round(rng.uniform(0.95, 1.05), 3)
+        config.hue_shift = rng.randint(-10, 10)
+        config.zoom_factor = round(rng.uniform(1.02, 1.08), 3)
+        # 第 3 步：主音频音量 ±10%、音调 ±2%。音调很敏感，只敢小幅浮动。
+        config.audio_volume = round(rng.uniform(0.90, 1.10), 3)
+        config.pitch_shift = round(rng.uniform(0.98, 1.02), 3)
+        return config
+
+    @classmethod
+    def randomized_for(cls, input_path: str):
+        """按输入视频文件名派生种子，再随机抽取一套参数。
+
+        只用文件名（basename）做种子：同一视频重跑、改名后重跑结果不同，
+        但同一文件名在不同目录下得到同一套参数，便于复现与排障。
+        """
+        digest = hashlib.sha256(
+            os.path.basename(input_path).encode("utf-8")
+        ).digest()
+        seed = int.from_bytes(digest[:8], "big")
+        return cls.randomized(seed)
 
     def validate(self):
         """
@@ -229,6 +313,20 @@ class VideoConfig:
             raise ValueError("brightness 必须在 -1 到 1 之间")
         if self.contrast < 0:
             raise ValueError("contrast 必须是非负数")
+
+        # 播放速度与色相、缩放（第 2 步新增）
+        if not isinstance(self.playback_speed, (int, float)) or not 0.5 <= self.playback_speed <= 2.0:
+            raise ValueError("playback_speed 必须在 0.5 到 2.0 之间")
+        if not isinstance(self.hue_shift, (int, float)) or not -30 <= self.hue_shift <= 30:
+            raise ValueError("hue_shift 必须在 -30 到 30 之间")
+        if not isinstance(self.zoom_factor, (int, float)) or not 1.0 <= self.zoom_factor <= 1.5:
+            raise ValueError("zoom_factor 必须在 1.0 到 1.5 之间")
+
+        # 音频多样化（第 3 步新增）
+        if not isinstance(self.audio_volume, (int, float)) or not 0 <= self.audio_volume <= 2.0:
+            raise ValueError("audio_volume 必须在 0 到 2.0 之间")
+        if not isinstance(self.pitch_shift, (int, float)) or not 0.5 <= self.pitch_shift <= 2.0:
+            raise ValueError("pitch_shift 必须在 0.5 到 2.0 之间")
 
         # 背景模糊
         if not isinstance(self.blur_background_enabled, bool):
