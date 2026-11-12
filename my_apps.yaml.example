@@ -1,0 +1,85 @@
+# Video Mover 配置模板
+# ---------------------------------------------------------------------------
+# 使用方法：复制为 my_apps.yaml 后填入你自己的值。
+#   cp my_apps.yaml.example my_apps.yaml
+# my_apps.yaml 不进仓库（见 .gitignore）；本模板只含占位符，不含任何真实
+# cookie / 代理密码 / token，请勿把填好真实密钥的文件公开分享。
+# ---------------------------------------------------------------------------
+
+# Video Mover 主程序配置（main.py 读取）
+# 优先级：环境变量 VIDEO_MOVER_* > 本文件 > 内置默认值（缺失时打警告，不直接崩）。
+video_mover:
+  source:
+    platform: tiktok        # 视频源平台：tiktok | douyin | weibo | twitter
+    account: "@example"     # 改成你自己的账号，例如 "@your_account"
+    url: "https://www.tiktok.com/@example"  # 与 account 对应，改成你自己的主页地址
+    f2_command: ["f2", "tk"]  # f2 子命令；换平台时按 f2 文档修改，例如抖音 ["f2", "dy"]
+  paths:
+    download_dir: "Download/tiktok/post/example"  # 相对仓库根目录；不存在时自动创建
+    dedup_dir: "Dedup"
+    upload_dir: "Upload"
+    flush_script: "flush_device_id.py"
+    dedup_script: "Dedup/dedup.py"
+    upload_script: "Upload/vx_upload.py"
+  schedule:
+    interval_minutes: 300   # 调度间隔（分钟），必须是 1-1440 的整数，超出范围会报错
+    timezone: "Asia/Singapore"  # 必须是合法的 IANA 时区名，例如 Asia/Shanghai
+  runtime:
+    max_workers: null       # null = CPU 核心数；也可填正整数
+    config_file: "my_apps.yaml"  # 传给 f2 命令的 -c 参数，相对仓库根目录
+
+# ---------------------------------------------------------------------------
+# 以下为 f2（下载器）的平台配置，字段结构与原仓库保持一致。
+# cookie / proxies 请填你自己的真实值；留空表示不使用。
+# ---------------------------------------------------------------------------
+douyin:
+  headers:
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+      like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0
+    Referer: https://www.douyin.com/
+  cookie: "YOUR_DOYIN_COOKIE_HERE"
+  proxies:
+    http://: ""
+    https://: ""
+
+# f2 tk -c my_apps.yaml -u https://www.tiktok.com/@example -i 2025-03-07 21-00-00|2025-03-07 22-00-00
+tiktok:
+  headers:
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+      like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0
+    Referer: https://www.tiktok.com/
+  cookie: "YOUR_TIKTOK_COOKIE_HERE"
+  proxies:
+    http://: "http://YOUR_PROXY_USER:YOUR_PROXY_PASSWORD@YOUR_PROXY_HOST:PORT"
+    https://: "http://YOUR_PROXY_USER:YOUR_PROXY_PASSWORD@YOUR_PROXY_HOST:PORT"
+  music: no
+  cover: no
+  desc: yes
+  folderize: yes
+  mode: post
+  naming: '{create}'
+  # interval: 2025-03-07 20-00-00|2025-03-07 21-00-00
+
+weibo:
+  headers:
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+      like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0
+    Referer: https://www.weibo.com/
+  cookie: "YOUR_WEIBO_COOKIE_HERE"
+  proxies:
+    http://: ""
+    https://: ""
+
+twitter:
+  headers:
+    User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+      like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0
+    Referer: https://twitter.com/
+  cookie: "YOUR_TWITTER_COOKIE_HERE"
+  proxies:
+    http://: ""
+    https://: ""
+
+bark:
+  key: ""
+token: "YOUR_F2_TOKEN_HERE"

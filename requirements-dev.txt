@@ -1,0 +1,5 @@
+# 开发依赖（最小集）
+# 安装：pip install -r requirements.txt -r requirements-dev.txt
+# 版本来源：PyPI JSON API，锁定日期 2026-11-12。
+-r requirements.txt
+pytest==9.2.0

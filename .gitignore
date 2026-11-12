@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# 本地配置与密钥（切勿提交真实值）
+.env
+.env.*
+!.env.example
+# my_apps.yaml 是本机实际配置（从 my_apps.yaml.example 复制后填写），不进仓库；
+# 仓库里只保留脱敏的 my_apps.yaml.example。
+my_apps.yaml
+cookies/
+*.cookie
+account.json
+accounts.ini
+*.pem
+*.key
+
+# 运行产物与下载内容
+Download/
+Upload/videos/
+app.log
+*.log
+
+# 大二进制资产（字体 / 音乐 / 视频 / 图片 / 可执行文件）不进仓库，
+# 本地通过 python scripts/download_assets.py 获取，详见 ASSETS.md。
+*.mp4
+*.mp3
+*.png
+*.jpg
+*.jpeg
+*.ttf
+*.otf
+*.exe
