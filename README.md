@@ -1,5 +1,7 @@
 # Video Mover: 多平台内容分发自动化流水线
 
+[![CI](https://github.com/xujw-org/video-mover/actions/workflows/ci.yml/badge.svg)](https://github.com/xujw-org/video-mover/actions/workflows/ci.yml)
+
 [简体中文](./README.md) | [English](./README_en.md)
 
 面向多平台内容运营场景的视频处理与发布工作流。

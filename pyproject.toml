@@ -1,0 +1,14 @@
+# 最小工程配置（第二批改进，2026-11-12）。
+# 注意：本仓库没有构建系统，这里只有 pytest 与 ruff 的工具配置；
+# 安装方式不变：pip install -r requirements.txt（运行依赖）
+#              pip install -r requirements-dev.txt（测试依赖）
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F"]
