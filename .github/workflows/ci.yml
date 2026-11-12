@@ -1,0 +1,56 @@
+# CI（第二批改进，2026-11-12）
+#
+# 跑什么：
+#   1. 编译检查：全仓库 python -m py_compile
+#   2. 测试：pytest -q（只装 requirements-dev.txt 里的测试依赖；
+#      opencv / ffmpeg-python / whisper / pydub 等重依赖不装，
+#      测试里用 tests/conftest.py 的替身模块代替）
+#   3. 上游补丁校验：先装 f2 再打补丁、再 --check。
+#      注意顺序不能反：补丁脚本在没装 f2 时 --check 直接返回 2，
+#      而刚装好的 f2 是没打过补丁的，--check 会失败；
+#      只有“先打补丁、再 --check”才能验证补丁脚本本身是对的。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile check
+        run: find . -name "*.py" -not -path "./.git/*" -print0 | xargs -0 python -m py_compile
+      - name: Run tests
+        run: pytest -q
+      - name: Install f2 and verify upstream patches
+        run: |
+          pip install f2==0.0.1.7
+          python scripts/apply_upstream_patches.py
+          python scripts/apply_upstream_patches.py --check
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile check
+        run: Get-ChildItem -Recurse -Filter *.py | ForEach-Object { python -m py_compile $_.FullName }
+      - name: Run tests
+        run: pytest -q
