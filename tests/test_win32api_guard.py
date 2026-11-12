@@ -23,8 +23,13 @@ import main as main_module
 
 
 def test_main_imports_without_win32api_on_windows():
-    """模拟 Windows 且未装 pywin32：reload main 不应抛错，win32api 为 None。"""
-    assert "win32api" not in sys.modules or sys.modules.get("win32api") is None
+    """模拟 Windows 且未装 pywin32：reload main 不应抛错，win32api 为 None。
+
+    注意：不要断言当前 sys.modules 里没有 win32api——CI 的 Windows
+    任务现在会装 pywin32（requirements-dev.txt 里有），所以它可能
+    已经作为真实模块存在；这个测试只关心“把它从 sys.modules 里
+    拿掉后，reload main 仍能成功且 win32api 为 None”。
+    """
     with mock.patch.object(os, "name", "nt"):
         with mock.patch.dict(sys.modules, {"win32api": None}):
             reloaded = importlib.reload(main_module)

@@ -5,6 +5,43 @@
 **xujw-org/video-mover**。本次只做了下面三组优先改进，没有重构业务逻辑，
 没有改动视频处理与上传流程本身。
 
+## CI Windows 修复之三：美区 runner 的 cp1252 编码（2026-11-12）
+
+第三次 CI 运行：Ubuntu 全过，windows-smoke 5 failed、107 passed。
+这次不是 tzdata（已修好），而是编码：
+
+- 3 个 `--help` 测试失败：`UnicodeEncodeError: 'charmap' codec
+  can't encode characters in position 207-214`。根因是 GitHub
+  Windows runner 是美区系统，stdio 默认编码是 cp1252（charmap），
+  根本编不了中文；而 argparse 的 `--help` 里有“输入视频文件路径”/
+  “输出视频文件路径”这类中文（位置 207-214 正好是这 8 个字），
+  直接打印就炸。本机用 `PYTHONIOENCODING=cp1252` 复现过，同一报错。
+- 1 个缺失输入测试失败：子进程 stderr 的错误处理是
+  backslashreplace，中文被写成 `\uXXXX` 转义，`"不存在"` 断言
+  找不到原文。
+- 1 个 win32api 测试失败：它断言“当前 sys.modules 里没有
+  win32api”，但 CI 现在会装 pywin32（上次修复加的），所以
+  win32api 已经作为真实模块存在，前置断言本身就是错的。
+
+修复：
+- `Dedup/dedup.py`：启动时把 stdout/stderr 重设为 UTF-8
+ （errors='replace'，失败时静默跳过），与 main.py 同款做法，
+  且放在 argparse 打印帮助之前。真实用户在美区 Windows 上
+  直接跑 `python Dedup/dedup.py --help` 也不崩。
+- `tests/test_shim.py`：子进程统一用 `encoding="utf-8"`、
+  `errors="replace"` 捕获，并传 `PYTHONUTF8=1` /
+  `PYTHONIOENCODING=utf-8`，不再依赖 runner 的默认编码。
+- `tests/test_win32api_guard.py`：删掉错误的前置断言，只验证
+  “把 win32api 从 sys.modules 拿掉后 reload main 仍成功”。
+- 顺手修了同类隐患：`main.py` 的 `MainCommandHandler` 用
+  `text=True` 读子进程输出时没写 encoding，美区 Windows 上
+  会按 cp1252 解码中文输出而失败；已补 `encoding='utf-8'`、
+  `errors='replace'`（`_build_subprocess_args` 里本来就有）。
+- 新增回归测试 `test_cli_help_with_charmap_stdio`：用
+  `PYTHONUTF8=0` + `PYTHONIOENCODING=cp1252` 模拟美区
+  Windows 跑 `--help`，验证修复后能正常退出且帮助里有中文。
+  测试总数 112 -> 113，全部通过。
+
 ## CI Windows 修复之二：tzdata 与控制台编码（2026-11-12）
 
 第二次 CI 运行：Ubuntu 全过，windows-smoke 在测试阶段失败，

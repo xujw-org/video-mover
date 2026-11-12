@@ -23,6 +23,18 @@ import logging
 import os
 import sys
 
+# GitHub Windows runner 是美区系统，stdio 默认编码是 cp1252（charmap），
+# 根本编不了中文；argparse 的 --help 里有“输入视频文件路径”这类中文，
+# 直接打印会抛 UnicodeEncodeError（CI 第三次运行的 3 个 --help 测试
+# 就是这么挂的）。启动时尽量把 stdout/stderr 重设为 UTF-8
+#（errors='replace'，失败时静默跳过），与 main.py 的做法一致。
+# 注意：这必须在 argparse 打印帮助之前执行，所以放在模块顶层。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # 让本文件无论以哪种方式运行都能找到 Dedup 包：
 # - python Dedup/dedup.py（sys.path[0] 是 Dedup 目录）
 # - python -m Dedup.dedup（包方式）

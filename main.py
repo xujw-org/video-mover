@@ -427,7 +427,9 @@ class MainCommandHandler(HandlerBase):
             stdout=subprocess.PIPE,          # 捕获标准输出
             stderr=subprocess.STDOUT,        # 将标准错误合并到标准输出
             text=True,                       # 以文本模式读取
-            bufsize=1,                       # 逐行缓冲
+            encoding='utf-8',                # 子进程输出按 UTF-8 解码；
+            errors='replace',                # 美区 Windows 默认是 cp1252，
+            bufsize=1,                       # 不加这句中文输出会解码失败
             universal_newlines=True,         # 跨平台换行符处理
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
         )
