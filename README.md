@@ -139,18 +139,21 @@ Content input
 
    ```yaml
    video_mover:
-     source:
-       platform: tiktok
-       account: "@example"     # 改成你自己的账号
-       url: "https://www.tiktok.com/@example"
-       f2_command: ["f2", "tk"]
+     sources:  # 多个博主按顺序抓取；旧版单个 source 写法仍可用
+       - platform: douyin
+         account: "@example"
+         url: "https://www.douyin.com/@example"
+       - platform: douyin
+         account: "@example2"
+         url: "https://www.douyin.com/@example2"
+     upload:
+       douyin_account: "default"  # 抖音上传账号名，见下方登录步骤
      paths:
-       download_dir: "Download/tiktok/post/example"  # 不存在时自动创建
        dedup_dir: "Dedup"
        upload_dir: "Upload"
        flush_script: "flush_device_id.py"
        dedup_script: "Dedup/dedup.py"
-       upload_script: "Upload/vx_upload.py"
+       upload_scripts: ["Upload/douyin_upload.py"]  # 按顺序执行，可再加视频号等
      schedule:
        interval_minutes: 300   # 必须是 1-1440 的整数
        timezone: "Asia/Singapore"  # 必须是合法的 IANA 时区名
@@ -160,11 +163,24 @@ Content input
    ```
 
    配置优先级：环境变量 `VIDEO_MOVER_*` > `my_apps.yaml` > 内置默认值。
+   注意环境变量只覆盖旧版单个 `source`，写了 `sources` 列表后以列表为准。
    环境变量清单见 `.env.example`（复制为 `.env` 后填写；`.env` 不进仓库）。
    缺失的配置项会打警告并用默认值补齐；`interval_minutes` 超出 1-1440 或时区
    不合法时会直接报错退出。
    下方的 `douyin` / `tiktok` / `weibo` / `twitter` 小节是 f2 的平台配置，
    其中的 cookie 与代理请填你自己的真实值。
+   抖音抓取用的就是 `douyin` 小节里的 cookie（下载也要登录态）。
+
+2. 抖音上传首次登录（只需一次，cookie 过期后重扫即可）：
+
+   ```bash
+   python Upload/cli_main.py douyin <账号名> login
+   ```
+
+   按提示在弹出的浏览器里扫码，cookie 会保存在
+   `Upload/cookies/douyin_<账号名>.json`。`<账号名>` 要和 `my_apps.yaml` 里
+   `video_mover.upload.douyin_account` 填的一致。上传脚本在调度里跑时如果
+   cookie 失效会直接退出并打印重登录提示，不会在无人值守时弹浏览器。
 
 2. 如启用 AI 文案功能，通过安全的本地配置方式提供 API Key，切勿提交到仓库。
 3. 首次运行平台适配器时，根据提示完成账号登录与 Cookie 初始化。

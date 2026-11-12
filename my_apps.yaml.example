@@ -8,19 +8,31 @@
 
 # Video Mover 主程序配置（main.py 读取）
 # 优先级：环境变量 VIDEO_MOVER_* > 本文件 > 内置默认值（缺失时打警告，不直接崩）。
+# 视频源支持多个博主：sources 列表里的每一项都会按顺序抓取，一个失败不中断其余源。
+# 旧版单个 source 写法仍可用（此时环境变量 VIDEO_MOVER_SOURCE_* 仍可覆盖）；
+# 一旦写了 sources，环境变量里的 SOURCE_* 不再生效，以列表为准。
 video_mover:
-  source:
-    platform: tiktok        # 视频源平台：tiktok | douyin | weibo | twitter
-    account: "@example"     # 改成你自己的账号，例如 "@your_account"
-    url: "https://www.tiktok.com/@example"  # 与 account 对应，改成你自己的主页地址
-    f2_command: ["f2", "tk"]  # f2 子命令；换平台时按 f2 文档修改，例如抖音 ["f2", "dy"]
+  sources:
+    - platform: douyin        # 视频源平台：douyin | tiktok；其它平台需显式写 f2_command
+      account: "@example"     # 改成博主账号，例如 "@dance2026"
+      url: "https://www.douyin.com/@example"  # 与 account 对应，改成博主主页地址
+      # f2_command 不写时按平台推导（douyin -> ["f2", "dy"]，tiktok -> ["f2", "tk"]）
+      # download_dir 不写时默认为 Download/<platform>/post/<account>，
+      # 若 f2 实际写到别处请显式写，例如 download_dir: "Download/douyin/post/dance2026"
+    - platform: douyin
+      account: "@example2"
+      url: "https://www.douyin.com/@example2"
+  upload:
+    douyin_account: "default"  # 抖音上传用的账号名；cookie 在 Upload/cookies/douyin_<账号名>.json
+                               # 首次使用前在 Windows 上扫码登录一次：
+                               #   python Upload/cli_main.py douyin <账号名> login
   paths:
-    download_dir: "Download/tiktok/post/example"  # 相对仓库根目录；不存在时自动创建
     dedup_dir: "Dedup"
     upload_dir: "Upload"
     flush_script: "flush_device_id.py"
     dedup_script: "Dedup/dedup.py"
-    upload_script: "Upload/vx_upload.py"
+    # 上传脚本按顺序执行：默认只传抖音；想同时传视频号再加一行 "Upload/vx_upload.py"
+    upload_scripts: ["Upload/douyin_upload.py"]
   schedule:
     interval_minutes: 300   # 调度间隔（分钟），必须是 1-1440 的整数，超出范围会报错
     timezone: "Asia/Singapore"  # 必须是合法的 IANA 时区名，例如 Asia/Shanghai

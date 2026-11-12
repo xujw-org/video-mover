@@ -76,11 +76,15 @@ DEFAULT_CONFIG = {
         "upload_dir": "Upload",
         "flush_script": "flush_device_id.py",
         "dedup_script": "Dedup/dedup.py",
-        "upload_script": "Upload/vx_upload.py",
+        "upload_script": "Upload/douyin_upload.py",
     },
     "schedule": {"interval_minutes": 300, "timezone": "Asia/Singapore"},
     "runtime": {"max_workers": None, "config_file": "my_apps.yaml"},
 }
+
+# f2 子命令按平台推导：只覆盖本项目验证过的两个平台，
+# 其余平台必须在配置里显式写 f2_command。
+_F2_COMMAND_BY_PLATFORM = {"douyin": ["f2", "dy"], "tiktok": ["f2", "tk"]}
 
 # 环境变量名前缀：环境变量优先于 my_apps.yaml，优先于内置默认值。
 ENV_PREFIX = "VIDEO_MOVER_"
@@ -146,18 +150,23 @@ class AppConfig:
     路径写相对路径时按仓库根目录解析；写绝对路径时直接使用。
 
     Attributes:
-        SOURCE_PLATFORM (str): 视频源平台，如 tiktok。
-        SOURCE_ACCOUNT (str): 视频源账号，如 @example。
-        SOURCE_URL (str): 视频源主页地址。
-        F2_COMMAND (list): f2 子命令，如 ['f2', 'tk']。
+        SOURCES (list): 视频源列表，每项含 platform / account / url /
+            f2_command / download_dir / main_command。来自
+            video_mover.sources；缺失时兼容旧版单个 source。
+        DOWNLOAD_DIRS (list): 全部视频源的下载目录（去重扫描用）。
+        SOURCE_PLATFORM (str): 第一个视频源的平台（兼容旧属性）。
+        SOURCE_ACCOUNT (str): 第一个视频源的账号（兼容旧属性）。
+        SOURCE_URL (str): 第一个视频源的主页地址（兼容旧属性）。
+        F2_COMMAND (list): 第一个视频源的 f2 子命令（兼容旧属性）。
         CONFIG_FILE (Path): 实际读取的配置文件路径。
-        DOWNLOAD_DIR (Path): 下载目录路径，不存在时自动创建。
+        DOWNLOAD_DIR (Path): 第一个视频源的下载目录（兼容旧属性）。
         DEDUP_DIR (Path): 去重目录路径。
         UPLOAD_DIR (Path): 上传目录路径。
         FLUSH_SCRIPT (Path): 刷新脚本路径。
         DEDUP_SCRIPT (Path): 去重脚本路径。
-        UPLOAD_SCRIPT (Path): 上传脚本路径。
-        MAIN_COMMAND (list): 主抓取命令。
+        UPLOAD_SCRIPTS (list): 上传脚本列表，按顺序执行。
+        UPLOAD_SCRIPT (Path): 第一个上传脚本（兼容旧属性）。
+        MAIN_COMMAND (list): 第一个视频源的主抓取命令（兼容旧属性）。
         SCHEDULE_INTERVAL (int): 调度间隔（分钟，取值范围：1-1440）。
         TIMEZONE (str): 时区，合法的 IANA 时区名。
         MAX_WORKERS (int): 最大工作线程数，默认 CPU 核心数。
@@ -171,23 +180,34 @@ class AppConfig:
         self.CONFIG_FILE = (raw_config if raw_config.is_absolute() else base_dir / raw_config).resolve()
         section = _load_yaml_config(self.CONFIG_FILE)
 
-        source = section.get("source", {}) or {}
         paths = section.get("paths", {}) or {}
         schedule = section.get("schedule", {}) or {}
         runtime = section.get("runtime", {}) or {}
         defaults = DEFAULT_CONFIG
 
-        self.SOURCE_PLATFORM = self._get(source, "platform", "SOURCE_PLATFORM", defaults["source"]["platform"])
-        self.SOURCE_ACCOUNT = self._get(source, "account", "SOURCE_ACCOUNT", defaults["source"]["account"])
-        self.SOURCE_URL = self._get(source, "url", "SOURCE_URL", defaults["source"]["url"])
-        f2_command = self._get(source, "f2_command", "F2_COMMAND", defaults["source"]["f2_command"])
-        if isinstance(f2_command, str):
-            f2_command = f2_command.split()
-        self.F2_COMMAND = [str(x) for x in f2_command]
+        # 视频源：优先用 sources 列表（多博主）；缺失时兼容旧版单个 source。
+        # 注意：环境变量 VIDEO_MOVER_SOURCE_* 只覆盖旧版单个 source，
+        # sources 列表里的每一项只读 yaml。
+        sources_raw = section.get("sources")
+        if sources_raw is None:
+            self.SOURCES = [self._parse_legacy_source(section, paths, base_dir, defaults)]
+        else:
+            if not isinstance(sources_raw, list) or not sources_raw:
+                raise ValueError("video_mover.sources 必须是非空列表，每个元素是一个视频源（platform/account/url）")
+            self.SOURCES = [
+                self._parse_source_entry(raw, index, base_dir, defaults)
+                for index, raw in enumerate(sources_raw)
+            ]
+        first = self.SOURCES[0]
+        # 兼容旧属性：以下字段恒等于第一个视频源，供沿用方与旧测试使用。
+        self.SOURCE_PLATFORM = first["platform"]
+        self.SOURCE_ACCOUNT = first["account"]
+        self.SOURCE_URL = first["url"]
+        self.F2_COMMAND = first["f2_command"]
+        self.DOWNLOAD_DIR = first["download_dir"]
+        self.MAIN_COMMAND = first["main_command"]
+        self.DOWNLOAD_DIRS = [s["download_dir"] for s in self.SOURCES]
 
-        self.DOWNLOAD_DIR = self._resolve_dir(
-            base_dir, self._get(paths, "download_dir", "DOWNLOAD_DIR", defaults["paths"]["download_dir"]),
-            "下载目录", create=True)
         self.DEDUP_DIR = self._resolve_dir(
             base_dir, self._get(paths, "dedup_dir", "DEDUP_DIR", defaults["paths"]["dedup_dir"]),
             "去重目录", create=False)
@@ -200,11 +220,20 @@ class AppConfig:
         self.DEDUP_SCRIPT = self._resolve_file(
             base_dir, self._get(paths, "dedup_script", "DEDUP_SCRIPT", defaults["paths"]["dedup_script"]),
             "去重脚本")
-        self.UPLOAD_SCRIPT = self._resolve_file(
-            base_dir, self._get(paths, "upload_script", "UPLOAD_SCRIPT", defaults["paths"]["upload_script"]),
-            "上传脚本")
-
-        self.MAIN_COMMAND = self.F2_COMMAND + ["-c", str(self.CONFIG_FILE), "-u", self.SOURCE_URL]
+        # 上传脚本：优先用 upload_scripts 列表（可同时传多个平台），
+        # 缺失时兼容旧版单个 upload_script（环境变量仍可覆盖）。
+        upload_scripts_raw = paths.get("upload_scripts")
+        if upload_scripts_raw is None:
+            upload_scripts_raw = [self._get(paths, "upload_script", "UPLOAD_SCRIPT", defaults["paths"]["upload_script"])]
+        if isinstance(upload_scripts_raw, str):
+            upload_scripts_raw = [upload_scripts_raw]
+        if not isinstance(upload_scripts_raw, list) or not upload_scripts_raw:
+            raise ValueError("video_mover.paths.upload_scripts 必须是非空列表，例如 [\"Upload/douyin_upload.py\"]")
+        self.UPLOAD_SCRIPTS = [
+            self._resolve_file(base_dir, item, f"上传脚本[{i}]")
+            for i, item in enumerate(upload_scripts_raw)
+        ]
+        self.UPLOAD_SCRIPT = self.UPLOAD_SCRIPTS[0]
 
         interval_raw = self._get(schedule, "interval_minutes", "INTERVAL_MINUTES",
                                  defaults["schedule"]["interval_minutes"])
@@ -248,6 +277,58 @@ class AppConfig:
             return section[key]
         logging.warning(f"配置缺失: video_mover.{key}（环境变量 {env_name}），使用默认值: {default!r}")
         return default
+
+    def _parse_legacy_source(self, section: dict, paths: dict, base_dir: Path, defaults: dict) -> dict:
+        """旧版单个 source：沿用环境变量覆盖逻辑，归一化成 sources 列表里的一项。"""
+        source = section.get("source", {}) or {}
+        platform = self._get(source, "platform", "SOURCE_PLATFORM", defaults["source"]["platform"])
+        account = self._get(source, "account", "SOURCE_ACCOUNT", defaults["source"]["account"])
+        url = self._get(source, "url", "SOURCE_URL", defaults["source"]["url"])
+        f2_command = self._get(source, "f2_command", "F2_COMMAND", defaults["source"]["f2_command"])
+        if isinstance(f2_command, str):
+            f2_command = f2_command.split()
+        download_dir = self._resolve_dir(
+            base_dir, self._get(paths, "download_dir", "DOWNLOAD_DIR", defaults["paths"]["download_dir"]),
+            "下载目录", create=True)
+        return self._build_source(platform, account, url, [str(x) for x in f2_command], download_dir)
+
+    def _parse_source_entry(self, raw, index: int, base_dir: Path, defaults: dict) -> dict:
+        """sources 列表里的一个视频源：只读 yaml，不走环境变量覆盖。"""
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"video_mover.sources[{index}] 必须是一个键值结构（platform/account/url），当前值: {raw!r}")
+        label = f"video_mover.sources[{index}]"
+        platform = str(raw.get("platform") or defaults["source"]["platform"])
+        account = str(raw.get("account") or defaults["source"]["account"])
+        url = raw.get("url")
+        if not url:
+            raise ValueError(f"{label} 缺少 url，请填写博主主页地址，例如 https://www.douyin.com/@xxx")
+        f2_command = raw.get("f2_command")
+        if f2_command is None:
+            f2_command = _F2_COMMAND_BY_PLATFORM.get(platform)
+            if f2_command is None:
+                raise ValueError(
+                    f"{label} 未指定 f2_command，且平台 {platform!r} 没有内置的 f2 子命令，"
+                    f"请显式填写，例如 [\"f2\", \"dy\"]")
+        if isinstance(f2_command, str):
+            f2_command = f2_command.split()
+        download_dir_raw = raw.get("download_dir")
+        if download_dir_raw is None:
+            download_dir_raw = f"Download/{platform}/post/{account.lstrip('@')}"
+            logging.info(f"{label} 未指定 download_dir，使用默认: {download_dir_raw}")
+        download_dir = self._resolve_dir(base_dir, download_dir_raw, f"{label} 的下载目录", create=True)
+        return self._build_source(platform, account, str(url), [str(x) for x in f2_command], download_dir)
+
+    def _build_source(self, platform, account, url, f2_command, download_dir: Path) -> dict:
+        """把一个视频源归一化成 dict，并拼出传给 f2 的主命令。"""
+        return {
+            "platform": str(platform),
+            "account": str(account),
+            "url": str(url),
+            "f2_command": list(f2_command),
+            "download_dir": download_dir,
+            "main_command": list(f2_command) + ["-c", str(self.CONFIG_FILE), "-u", str(url)],
+        }
 
     @staticmethod
     def _resolve_path(base_dir: Path, value, name: str) -> Path:
@@ -311,11 +392,13 @@ class FileManager(HandlerBase):
     def __init__(self, config: AppConfig):
         self.config = config
         self.observer = Observer()
-        self.observer.schedule(
-            FileChangeHandler(self._on_file_changed), 
-            str(self.config.DOWNLOAD_DIR), 
-            recursive=True
-        )
+        download_dirs = getattr(config, "DOWNLOAD_DIRS", [config.DOWNLOAD_DIR])
+        for watch_dir in dict.fromkeys(download_dirs):
+            self.observer.schedule(
+                FileChangeHandler(self._on_file_changed),
+                str(watch_dir),
+                recursive=True
+            )
         self.observer.start()
 
     def _on_file_changed(self, file_path: str) -> None:
@@ -345,13 +428,15 @@ class FileManager(HandlerBase):
 
     def _get_video_files(self, start_time: datetime, end_time: datetime) -> List[Path]:
         video_files = []
-        for folder_path in self.config.DOWNLOAD_DIR.glob('*'):
-            if not folder_path.is_dir():
-                continue
-            folder_time = self._parse_folder_time(folder_path.name)
-            if folder_time and start_time <= folder_time <= end_time:
-                for file in folder_path.glob('*.mp4'):
-                    video_files.append(file)
+        download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
+        for download_dir in download_dirs:
+            for folder_path in download_dir.glob('*'):
+                if not folder_path.is_dir():
+                    continue
+                folder_time = self._parse_folder_time(folder_path.name)
+                if folder_time and start_time <= folder_time <= end_time:
+                    for file in folder_path.glob('*.mp4'):
+                        video_files.append(file)
         return video_files
 
     @lru_cache(maxsize=100)
@@ -420,7 +505,26 @@ class MainCommandHandler(HandlerBase):
         self.current_process = None
 
     def execute_main_command(self, time_range_str: str) -> tuple[bool, bool]:
-        command = self.config.MAIN_COMMAND + ["-i", time_range_str]
+        """逐个抓取全部视频源。
+
+        一个源失败不中断其余源。返回 (至少一个源成功, 任一源命中 403 Forbidden)；
+        命中 403 时调度器会跑刷新脚本后整体重试一次（f2 会跳过已下载过的文件）。
+        """
+        results = []
+        for source in self.config.SOURCES:
+            command = source["main_command"] + ["-i", time_range_str]
+            logging.info(f"开始抓取视频源: {source['platform']} {source['account']} ({source['url']})")
+            success, forbidden_found = self._run_command(command)
+            results.append((source, success, forbidden_found))
+        success = any(ok for _, ok, _ in results)
+        forbidden_found = any(found for _, _, found in results)
+        failed = [f"{s['platform']} {s['account']}" for s, ok, _ in results if not ok]
+        if failed:
+            logging.warning(f"以下视频源抓取失败（其余源的下载仍会继续处理）: {', '.join(failed)}")
+        return success, forbidden_found
+
+    def _run_command(self, command: list) -> tuple[bool, bool]:
+        """执行一条 f2 抓取命令，返回 (成功, 是否命中 403 Forbidden)。"""
         logging.info(f"\n{'='*35}\n开始执行主命令 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")
         self.current_process = subprocess.Popen(
             command,
@@ -468,20 +572,24 @@ class UploadHandler(HandlerBase):
     def run(self) -> bool:
         self.config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         logging.info(f"\n{'='*35}\n开始执行上传脚本 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")
-        process = subprocess.Popen(
-            [sys.executable, str(self.config.UPLOAD_SCRIPT)],
-            stdout=None,
-            stderr=None,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-        )
-        process.wait()
-        success = process.returncode == 0
-        if success:
-            logging.info("上传脚本执行成功")
-        else:
-            logging.error(f"上传脚本执行失败，返回码: {process.returncode}")
+        scripts = getattr(self.config, "UPLOAD_SCRIPTS", [self.config.UPLOAD_SCRIPT])
+        overall_success = True
+        for script in scripts:
+            logging.info(f"执行上传脚本: {script}")
+            process = subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=None,
+                stderr=None,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+            )
+            process.wait()
+            if process.returncode == 0:
+                logging.info(f"上传脚本执行成功: {script}")
+            else:
+                logging.error(f"上传脚本执行失败: {script}，返回码: {process.returncode}")
+                overall_success = False
         logging.info(f"\n{'='*35}\n上传脚本执行结束 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")
-        return success
+        return overall_success
 
 # 调度管理类
 class SchedulerManager:
@@ -514,9 +622,11 @@ class SchedulerManager:
             self.shutdown()
 
     def _print_banner(self) -> None:
+        sources_desc = "、".join(f"{s['platform']} {s['account']}" for s in self.config.SOURCES)
         logging.info(
             f"\n{'=' * 35}\n"
-            "TikTok数据抓取调度器\n"
+            "视频抓取调度器\n"
+            f"视频源: {sources_desc}\n"
             f"动态时间范围: 滚动{self.config.SCHEDULE_INTERVAL}分钟窗口\n"
             f"执行间隔: 每{self.config.SCHEDULE_INTERVAL}分钟\n"
             "退出方式: Ctrl+C\n"
