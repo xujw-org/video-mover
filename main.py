@@ -558,12 +558,15 @@ class FileManager(HandlerBase):
         """Download 目录里所有还没处理过的作品视频，按作品时间从旧到新。"""
         processed = self._load_processed()
         repo_root = Path(__file__).parent.resolve()
-        download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
-        pending = []
-        for download_dir in download_dirs:
-            for folder_path in self._iter_work_dirs(download_dir):
+        pending, seen = [], set()
+        for root in self._scan_roots():
+            for folder_path in self._iter_work_dirs(root):
                 folder_time = self._parse_folder_time(folder_path.name)
                 for file in sorted(folder_path.glob("*.mp4")):
+                    resolved = str(file.resolve())
+                    if resolved in seen:
+                        continue
+                    seen.add(resolved)
                     try:
                         key = str(file.resolve().relative_to(repo_root))
                     except ValueError:
@@ -576,6 +579,23 @@ class FileManager(HandlerBase):
         if limit and limit > 0:
             files = files[:limit]
         return files
+
+    def _scan_roots(self) -> List[Path]:
+        """要扫的根目录：各源的下载目录 + 它们的上一层。
+
+        抖音走浏览器通道后，作品落在 `<download_dir>/<昵称>/<作品时间>/`；但
+        手动用 `python douyin_fetch.py --url ... --days N` 抓的历史作品默认落在
+        `Download/douyin/post/<昵称>/<作品时间>/`（正好是配置目录的上一层）。
+        两个都扫，同一批文件去重。
+        """
+        roots = []
+        download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
+        for raw in download_dirs:
+            path = Path(raw)
+            for candidate in (path, path.parent):
+                if candidate.is_dir() and candidate not in roots:
+                    roots.append(candidate)
+        return roots
 
     def _iter_work_dirs(self, download_dir: Path):
         """列出下载目录里的“单个作品文件夹”（名字是作品发布时间）。
@@ -603,13 +623,16 @@ class FileManager(HandlerBase):
                     yield grandchild
 
     def _get_video_files(self, start_time: datetime, end_time: datetime) -> List[Path]:
-        video_files = []
-        download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
-        for download_dir in download_dirs:
-            for folder_path in self._iter_work_dirs(download_dir):
+        video_files, seen = [], set()
+        for root in self._scan_roots():
+            for folder_path in self._iter_work_dirs(root):
                 folder_time = self._parse_folder_time(folder_path.name)
-                if folder_time and start_time <= folder_time <= end_time:
-                    for file in folder_path.glob('*.mp4'):
+                if not folder_time or not (start_time <= folder_time <= end_time):
+                    continue
+                for file in sorted(folder_path.glob('*.mp4')):
+                    key = str(file.resolve())
+                    if key not in seen:
+                        seen.add(key)
                         video_files.append(file)
         return video_files
 
