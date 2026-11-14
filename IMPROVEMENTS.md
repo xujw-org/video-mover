@@ -392,7 +392,7 @@ free，总量约 100GB）：
 | `%TEMP%` 里我们的诊断素材 + Playwright 残留 profile | **~118 MB** | 我们产生的（已清） |
 | `C:\CrashDumps` 里一个游戏转储 | 219 MB | 与本项目无关（旧的） |
 | `C:\Windows` | 26.9 GB | 系统 |
-| `C:\Users\79365`（.android 10.4GB、AppData 22GB…） | 39.1 GB | 既有数据 |
+| `C:\Users\79365`（AppData 16GB、.vscode 2.3GB…） | 39.1 GB | 既有数据 （注：`.android` 看似 10.4GB，实际是到 `E:\Android\.android` 的 junction，并不占 C 盘） |
 
 也就是说**这个工作流真正加的只有 ~1.2GB**（Playwright 浏览器 + 临时文件），
 C 盘本来就在 93% 左右的临界区，这次只是压垮它的最后一根稻草（另外 4K 处理时
