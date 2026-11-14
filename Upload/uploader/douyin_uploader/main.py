@@ -10,6 +10,49 @@ from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 
 
+def upload_headless() -> bool:
+    """上传时是否无窗口跑（默认是）。
+
+    抖音上传是网页自动化，没必要弹 Chrome 窗口。需要盯界面调试时设
+    ``DOUYIN_UPLOAD_HEADED=1`` 即可恢复有界面。
+    """
+    value = os.environ.get("DOUYIN_UPLOAD_HEADED", "").strip().lower()
+    return value not in ("1", "true", "yes", "on")
+
+
+def upload_dry_run() -> bool:
+    """是否只完成到“发布”按钮之前（不真的发布）。
+
+    由 ``video_mover.upload.dry_run`` 经环境变量 ``DOUYIN_UPLOAD_DRY_RUN`` 传入。
+    """
+    value = os.environ.get("DOUYIN_UPLOAD_DRY_RUN", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
+# 登录/扫码页面的特征（抖音改版过几次：旧代码只认“手机号登录”，新版扫码/手机号
+# 表单里这些文字不在 innerText 里（placeholder 不算正文），必须直接找元素）。
+_LOGIN_TEXT_MARKERS = ("扫码登录", "手机号登录", "验证码登录", "立即登录")
+_LOGIN_INPUT_SELECTORS = ('input[name="normal-input"]', 'input[name="web-login-area-code-input"]')
+
+
+async def _looks_like_login_page(page) -> bool:
+    for text in _LOGIN_TEXT_MARKERS:
+        try:
+            node = page.get_by_text(text).first
+            if await node.count() and await node.is_visible():
+                return True
+        except Exception:
+            continue
+    for selector in _LOGIN_INPUT_SELECTORS:
+        try:
+            node = page.locator(selector).first
+            if await node.count() and await node.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -19,20 +62,22 @@ async def cookie_auth(account_file):
         page = await context.new_page()
         # 访问指定的 URL
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
+        ok = True
         try:
-            await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=5000)
+            await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=8000)
         except:
-            print("[+] 等待5秒 cookie 失效")
-            await context.close()
-            await browser.close()
-            return False
-        # 2024.06.17 抖音创作者中心改版
-        if await page.get_by_text('手机号登录').count():
-            print("[+] 等待5秒 cookie 失效")
-            return False
-        else:
-            print("[+] cookie 有效")
-            return True
+            douyin_logger.warning("[+] cookie 失效（未进入上传页）")
+            ok = False
+        if ok:
+            await page.wait_for_timeout(2000)
+            if await _looks_like_login_page(page):
+                douyin_logger.warning("[+] cookie 失效（页面是登录/扫码页）")
+                ok = False
+        await context.close()
+        await browser.close()
+        if ok:
+            douyin_logger.info("[+] cookie 有效")
+        return ok
 
 
 async def douyin_setup(account_file, handle=False):
@@ -94,12 +139,57 @@ class DouYinVideo(object):
         douyin_logger.info('视频出错了，重新上传中')
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
 
+    async def _dismiss_guides(self, page) -> None:
+        """关掉新手引导浮层。
+
+        创作者中心会弹“视频预览功能”之类的气泡（带一个“我知道了”按钮），
+        它会盖住底部按钮，导致“发布”点了没反应（本机实测：点了几十次都没发出去）。
+        """
+        for text in ("我知道了", "知道了", "暂不需要"):
+            try:
+                button = page.get_by_text(text, exact=True)
+                if await button.count():
+                    await button.first.click(timeout=2000)
+                    douyin_logger.info(f"  [-] 关掉引导浮层：{text}")
+                    await asyncio.sleep(0.5)
+            except Exception:
+                continue
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    async def publish_video(self, page) -> None:
+        """点“发布”并确认结果；最多试 3 次，失败就报错，不无限重试。
+
+        以前这里是 `while True` 死循环，且只认跳转到 content/manage 为成功；
+        遇到引导浮层遮住按钮时就永远在循环里狂点发布。
+        """
+        for attempt in range(1, 4):
+            await self._dismiss_guides(page)
+            publish_button = page.get_by_role('button', name="发布", exact=True)
+            if not await publish_button.count():
+                douyin_logger.error("  [-] 找不到“发布”按钮")
+                break
+            await publish_button.first.click()
+            try:
+                await page.wait_for_url("**/creator-micro/content/manage**", timeout=15000)
+                douyin_logger.success("  [-]视频发布成功")
+                return
+            except Exception:
+                douyin_logger.warning(f"  [-] 第 {attempt} 次点发布后未跳转到作品列表")
+                await asyncio.sleep(2)
+        raise RuntimeError("抖音发布未成功：点击“发布”后没有跳转到作品管理页")
+
     async def upload(self, playwright: Playwright) -> None:
-        # 使用 Chromium 浏览器启动一个浏览器实例
+        # 使用 Chromium 浏览器启动一个浏览器实例（默认无窗口，见 upload_headless）
+        headless = upload_headless()
         if self.local_executable_path:
-            browser = await playwright.chromium.launch(headless=False, executable_path=self.local_executable_path)
+            browser = await playwright.chromium.launch(
+                headless=headless, executable_path=self.local_executable_path
+            )
         else:
-            browser = await playwright.chromium.launch(headless=False)
+            browser = await playwright.chromium.launch(headless=headless)
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         context = await browser.new_context(storage_state=f"{self.account_file}")
         context = await set_init_script(context)
@@ -194,20 +284,15 @@ class DouYinVideo(object):
             await self.set_schedule_time_douyin(page, self.publish_date)
 
         # 判断视频是否发布成功
-        while True:
-            # 判断视频是否发布成功
+        if upload_dry_run():
+            # 只验流程：表单填好、封面上传好，停在“发布”按钮之前
+            douyin_logger.info("  [-] dry_run：表单已就绪，停在“发布”按钮前，不真正发布")
             try:
-                publish_button = page.get_by_role('button', name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url("https://creator.douyin.com/creator-micro/content/manage**",
-                                        timeout=3000)  # 如果自动跳转到作品页面，则代表发布成功
-                douyin_logger.success("  [-]视频发布成功")
-                break
-            except:
-                douyin_logger.info("  [-] 视频正在发布中...")
-                await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+                await page.screenshot(path=str(self.file_path) + ".dry_run.png", full_page=True)
+            except Exception:
+                pass
+        else:
+            await self.publish_video(page)
 
         await context.storage_state(path=self.account_file)  # 保存cookie
         douyin_logger.success('  [-]cookie更新完毕！')

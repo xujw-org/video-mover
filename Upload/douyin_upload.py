@@ -18,14 +18,30 @@
     python Upload/cli_main.py douyin <账号名> login
 
 cookie 保存在 Upload/cookies/douyin_<账号名>.json，过期后重新扫码即可。
-注意：上传用的是有界面的 Chrome（DouYinVideo 内部 headless=False），
-需要在有图形界面的 Windows 机器上跑；cookie 校验失败时本脚本直接退出，
-不会在无人值守的调度里弹浏览器。
+上传默认**无窗口**（headless）跑：不需要盯着浏览器，也不会在桌面弹窗。
+`video_mover.upload` 里两个可选开关：
+
+    upload:
+      headless: true    # false 时回到有界面，方便跟界面排查问题
+      dry_run: false    # true 时只把表单填到“发布”前，不真的发布（不删文件）
 """
 import asyncio
+import os
 import re
 import sys
 from pathlib import Path
+
+# 标题往往带 emoji（抖音作品 desc 原样带过来），Windows 控制台默认 cp936，
+# 直接 print 会抛 UnicodeEncodeError 把整个上传打断。跟 main.py 一样把
+# stdout/stderr 改成 UTF-8（errors=replace）；在 start.bat 的 chcp 65001 下
+# 显示正常，在旧控制台里至少不会崩。
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # 脚本所在目录（Upload/）进 sys.path，保证 `import conf / uploader.*` 能找到。
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
@@ -37,6 +53,43 @@ COOKIES_DIR = Path(BASE_DIR) / "cookies"
 MAX_TITLE_LEN = 30  # 抖音标题上限 30 字，DouYinVideo 内部也会截断，这里先截好方便打日志
 MAX_TAGS = 10
 _TAG_RE = re.compile(r"#([^\s#]+)")
+
+
+def _truthy(value) -> bool:
+    """配置里的开关可能是 bool，也可能是 "true"/"1"/"yes"/"on" 字串。"""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def apply_upload_options(upload_cfg, environ=None):
+    """把 video_mover.upload 的 headless / dry_run 落到环境变量上。
+
+    浏览器是在 uploader/douyin_uploader 里深层创建的，用环境变量传最省事：
+    - ``DOUYIN_UPLOAD_HEADED=1``  → 有界面（默认无窗口）
+    - ``DOUYIN_UPLOAD_DRY_RUN=1`` → 只填到“发布”前，不真正发布
+
+    返回实际生效的 ``{"headless": bool, "dry_run": bool}``，方便打日志和测试。
+    """
+    environ = os.environ if environ is None else environ
+    upload_cfg = upload_cfg or {}
+    # 配置是主来源；环境变量只能往“更安全/更好调试”的方向覆盖：
+    # DOUYIN_UPLOAD_HEADED=1 强制有界面，DOUYIN_UPLOAD_DRY_RUN=1 强制不发布。
+    headless = _truthy(upload_cfg.get("headless", True)) and not _truthy(
+        environ.get("DOUYIN_UPLOAD_HEADED")
+    )
+    dry_run = _truthy(upload_cfg.get("dry_run", False)) or _truthy(
+        environ.get("DOUYIN_UPLOAD_DRY_RUN")
+    )
+    if headless:
+        environ.pop("DOUYIN_UPLOAD_HEADED", None)
+    else:
+        environ["DOUYIN_UPLOAD_HEADED"] = "1"
+    if dry_run:
+        environ["DOUYIN_UPLOAD_DRY_RUN"] = "1"
+    else:
+        environ.pop("DOUYIN_UPLOAD_DRY_RUN", None)
+    return {"headless": headless, "dry_run": dry_run}
 
 
 def _load_video_mover_section(config_path):
@@ -84,8 +137,18 @@ def _resolve_download_dirs(section, repo_root):
     for raw in raw_dirs:
         path = Path(str(raw))
         path = path if path.is_absolute() else Path(repo_root) / path
-        if path.is_dir() and path not in dirs:
-            dirs.append(path)
+        # 优先配置里的下载目录本身（抖音浏览器通道会把作品放在
+        # <配置目录>/<昵称>/<时间>/）；配置目录不存在时退一层——手动用
+        # douyin_fetch.py 默认参数抓的历史作品落在 Download/douyin/post/<昵称>/<时间>/，
+        # 正好是配置目录的上一层。
+        if path.is_dir():
+            candidate = path
+        elif path.parent.is_dir():
+            candidate = path.parent
+        else:
+            continue
+        if candidate not in dirs:
+            dirs.append(candidate)
     return dirs
 
 
@@ -107,10 +170,13 @@ def parse_desc_text(text):
 
 
 def find_desc_file(video_path, download_dirs):
-    """按去重输出的文件名约定找 f2 的描述文件。
+    """按去重输出的文件名约定找描述文件。
 
-    去重输出沿用下载文件名 `<时间>_video.mp4`，描述文件在下载目录下
+    去重输出沿用下载文件名 `<时间>_video.mp4`，描述文件在下载目录下的
     `<时间>/<时间>_desc.txt`（与 Upload/vx_upload.py 同一约定）。
+
+    抖音走浏览器通道后，下载目录还会多一层昵称（`Download/.../post/<账号>/<昵称>/<时间>/`），
+    所以这里先看下载目录本层，再往下一层找一次。
     """
     video_path = Path(video_path)
     stem = video_path.name
@@ -118,10 +184,18 @@ def find_desc_file(video_path, download_dirs):
         video_time = stem[: -len("_video.mp4")]
     else:
         video_time = video_path.stem
+    rel = Path(video_time) / f"{video_time}_desc.txt"
     for download_dir in download_dirs:
-        candidate = Path(download_dir) / video_time / f"{video_time}_desc.txt"
+        download_dir = Path(download_dir)
+        candidate = download_dir / rel
         if candidate.is_file():
             return candidate
+        for nested in sorted(download_dir.glob("*")):
+            if not nested.is_dir():
+                continue
+            candidate = nested / rel
+            if candidate.is_file():
+                return candidate
     return None
 
 
@@ -189,11 +263,16 @@ async def run(video_dir=VIDEO_DIR, config_path=None, repo_root=None):
 
     if not await douyin_setup(str(account_file), handle=False):
         print(f"抖音 cookie 已失效：{account_file}")
-        print("请重新扫码登录：")
-        print(f"  python Upload/cli_main.py douyin {account} login")
+        print("先把浏览器里最新的抖音 cookie 更新到 my_apps.yaml 的 douyin.cookie，然后：")
+        print("  python Upload/export_cookie.py      # 网页 cookie -> 上传器 cookie")
+        print("（不想用网页 cookie 时，也可以扫码：")
+        print(f"  python Upload/cli_main.py douyin {account} login ）")
         return 1
 
     download_dirs = _resolve_download_dirs(section, repo_root)
+    options = apply_upload_options(upload_cfg)
+    print(f"上传模式：{'无窗口' if options['headless'] else '有界面'}"
+          + ("（dry_run：不真正发布）" if options["dry_run"] else ""))
     failed, succeeded = [], []
     for video_path in videos:
         title, tags = resolve_title_tags(video_path, download_dirs)
@@ -205,6 +284,11 @@ async def run(video_dir=VIDEO_DIR, config_path=None, repo_root=None):
             failed.append(video_path)
             continue
         succeeded.append(video_path)
+
+    if options["dry_run"]:
+        # dry_run 下没真的发布，文件不能删
+        print(f"dry_run 完成：{len(succeeded)} 个视频走到发布前，未发布也未删除")
+        return 0 if not failed else 1
 
     for video_path in succeeded:
         try:

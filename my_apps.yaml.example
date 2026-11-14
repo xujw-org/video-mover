@@ -24,8 +24,12 @@ video_mover:
       url: "https://www.douyin.com/@example2"
   upload:
     douyin_account: "default"  # 抖音上传用的账号名；cookie 在 Upload/cookies/douyin_<账号名>.json
-                               # 首次使用前在 Windows 上扫码登录一次：
-                               #   python Upload/cli_main.py douyin <账号名> login
+    # 上传 cookie 两种来源（推荐第一种，不用扫码、不用弹浏览器）：
+    #   1) 由上面的 douyin.cookie 直接转换（creator.douyin.com 与 www 共用
+    #      .douyin.com 作用域）：python Upload/export_cookie.py
+    #   2) 传统方式：python Upload/cli_main.py douyin <账号名> login（随后扫码）
+    headless: true   # 上传时无窗口跑（不会在桌面弹 Chrome）；调试界面时改 false
+    dry_run: false   # true = 只把表单填到“发布”按钮前，不真正发布（也不删文件）
   paths:
     dedup_dir: "Dedup"
     upload_dir: "Upload"
@@ -53,6 +57,15 @@ douyin:
   proxies:
     http://: ""
     https://: ""
+  # 下面几项是 f2 的抓取参数。注意：抖音从 2026-11-14 起改走浏览器通道
+  # （douyin_fetch.py），因为这版 f2 的请求会被抖音新的 Argus secsdk 签名
+  # 风控全部 403；此时 folderize / mode / naming 不再生效（抓取器直接按
+  # Download/<昵称>/<作品时间>/<id>.mp4 落盘），只有 cookie 仍然必需。
+  # 保留它们是为了以后 f2 修好签名、或手动跑 f2 时不用再改配置。
+  folderize: yes
+  mode: post
+  naming: '{create}'
+  # interval: 2025-03-07 20-00-00|2025-03-07 21-00-00
 
 # f2 tk -c my_apps.yaml -u https://www.tiktok.com/@example -i 2025-03-07 21-00-00|2025-03-07 22-00-00
 tiktok:

@@ -5,6 +5,7 @@ import signal
 import psutil
 import logging
 import subprocess
+import douyin_fetch
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -68,7 +69,7 @@ DEFAULT_CONFIG = {
         "platform": "tiktok",
         "account": "@example",
         "url": "https://www.tiktok.com/@example",
-        "f2_command": ["f2", "tk"],
+        "f2_command": ["f2", "tk", "-M", "post"],
     },
     "paths": {
         "download_dir": "Download/tiktok/post/example",
@@ -84,7 +85,27 @@ DEFAULT_CONFIG = {
 
 # f2 子命令按平台推导：只覆盖本项目验证过的两个平台，
 # 其余平台必须在配置里显式写 f2_command。
-_F2_COMMAND_BY_PLATFORM = {"douyin": ["f2", "dy"], "tiktok": ["f2", "tk"]}
+#
+# `-M post` 不能省：f2 0.0.1.7 的 douyin / tiktok CLI 把 mode 定义成
+# “无默认值”的选项（cli.py 里 default 被注释掉了），不传就直接报
+# “DouYin CLI 缺乏必要参数：mode” 并直接退出，一个文件也不会下。
+# post = 按主页作品抓取，与本项目的 source.url（博主主页）用法一致。
+_F2_COMMAND_BY_PLATFORM = {
+    "douyin": ["f2", "dy", "-M", "post"],
+    "tiktok": ["f2", "tk", "-M", "post"],
+}
+
+# 判定 f2 命令里是否已经指定了下载模式。
+_MODE_FLAGS = ("-M", "--mode")
+
+
+def _ensure_mode(f2_command: list) -> list:
+    """确保 f2 命令带下载模式；用户自定义的 f2_command 也不例外。"""
+    command = [str(x) for x in f2_command]
+    if any(flag in command for flag in _MODE_FLAGS):
+        return command
+    logging.info("f2 命令未指定 -M/--mode，已补默认值 post（按主页作品抓取）")
+    return command + ["-M", "post"]
 
 # 环境变量名前缀：环境变量优先于 my_apps.yaml，优先于内置默认值。
 ENV_PREFIX = "VIDEO_MOVER_"
@@ -321,6 +342,7 @@ class AppConfig:
 
     def _build_source(self, platform, account, url, f2_command, download_dir: Path) -> dict:
         """把一个视频源归一化成 dict，并拼出传给 f2 的主命令。"""
+        f2_command = _ensure_mode(f2_command)
         return {
             "platform": str(platform),
             "account": str(account),
@@ -426,13 +448,36 @@ class FileManager(HandlerBase):
         logging.info(f"已处理 {total_processed} 个视频")
         return total_processed
 
+    def _iter_work_dirs(self, download_dir: Path):
+        """列出下载目录里的“单个作品文件夹”（名字是作品发布时间）。
+
+        f2 0.0.1.7 的落盘结构是::
+
+            <path>/<app>/<mode>/<昵称>/<create>/<aid>.mp4
+
+        其中 `<path>` 是 f2 配置里的 path（默认 Download），`<create>` 形如
+        “2026-11-14 15-17-57”，需要 f2 配置 folderize: yes + naming: '{create}'
+        （见 my_apps.yaml.example 的 douyin / tiktok 小节）。
+
+        而 my_apps.yaml 的 download_dir 可能配到 `<昵称>` 这一层（默认值
+        `Download/<platform>/post/<account>` 就是），也可能只配到 `<mode>`
+        层。所以这里先找本层的时间戳目录，再往下一层找一次。
+        """
+        for child in download_dir.glob('*'):
+            if not child.is_dir():
+                continue
+            if self._parse_folder_time(child.name):
+                yield child
+                continue
+            for grandchild in child.glob('*'):
+                if grandchild.is_dir() and self._parse_folder_time(grandchild.name):
+                    yield grandchild
+
     def _get_video_files(self, start_time: datetime, end_time: datetime) -> List[Path]:
         video_files = []
         download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
         for download_dir in download_dirs:
-            for folder_path in download_dir.glob('*'):
-                if not folder_path.is_dir():
-                    continue
+            for folder_path in self._iter_work_dirs(download_dir):
                 folder_time = self._parse_folder_time(folder_path.name)
                 if folder_time and start_time <= folder_time <= end_time:
                     for file in folder_path.glob('*.mp4'):
@@ -509,9 +554,19 @@ class MainCommandHandler(HandlerBase):
 
         一个源失败不中断其余源。返回 (至少一个源成功, 任一源命中 403 Forbidden)；
         命中 403 时调度器会跑刷新脚本后整体重试一次（f2 会跳过已下载过的文件）。
+
+        抖音源不走 f2：抖音对 aweme/post 强制 Argus secsdk 签名
+        （x-secsdk-web-signature + uifid/webid/fp/timestamp），f2 0.0.1.7 的
+        请求里没有这些字段，必然 403。抖音改走 douyin_fetch 的浏览器通道，
+        详见 douyin_fetch.py 顶部的说明与 IMPROVEMENTS.md。
         """
         results = []
+        since, until = douyin_fetch.parse_time_range_string(time_range_str)
         for source in self.config.SOURCES:
+            if source["platform"] == "douyin":
+                success = self._fetch_douyin_source(source, since, until)
+                results.append((source, success, False))
+                continue
             command = source["main_command"] + ["-i", time_range_str]
             logging.info(f"开始抓取视频源: {source['platform']} {source['account']} ({source['url']})")
             success, forbidden_found = self._run_command(command)
@@ -522,6 +577,30 @@ class MainCommandHandler(HandlerBase):
         if failed:
             logging.warning(f"以下视频源抓取失败（其余源的下载仍会继续处理）: {', '.join(failed)}")
         return success, forbidden_found
+
+    def _fetch_douyin_source(self, source: dict, since, until) -> bool:
+        """用浏览器通道抓一个抖音源；返回是否成功（没新作品也算成功）。"""
+        logging.info(f"开始抓取视频源: {source['platform']} {source['account']} ({source['url']})")
+        logging.info(
+            f"\n{'='*35}\n开始抓取抖音主页（浏览器通道） - 时间: "
+            f"{datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        try:
+            count = douyin_fetch.fetch_and_download(
+                source["url"],
+                download_dir=source["download_dir"],
+                config_path=self.config.CONFIG_FILE,
+                since=since,
+                until=until,
+            )
+        except Exception as exc:
+            logging.error(f"抖音抓取失败: {exc}")
+            return False
+        logging.info(
+            f"\n{'='*35}\n抖音主页抓取结束（新增 {count} 条视频） - 时间: "
+            f"{datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        return True
 
     def _run_command(self, command: list) -> tuple[bool, bool]:
         """执行一条 f2 抓取命令，返回 (成功, 是否命中 403 Forbidden)。"""

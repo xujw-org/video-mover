@@ -64,6 +64,14 @@ def _load_douyin_upload():
 
 def test_sources_list_parsed_with_derived_values(tmp_path):
     dl2 = tmp_path / "dl2"
+    # 这个用例故意用“推导出的默认下载目录”，会落在仓库根目录的 Download/ 下。
+    # 清理时只能删本次测试自己建的那两个空目录——以前是
+    # shutil.rmtree(REPO_ROOT / "Download")，会把用户真实下载的视频一起删掉。
+    derived_dirs = [
+        REPO_ROOT / "Download" / "douyin" / "post" / "dance2026",
+        REPO_ROOT / "Download" / "tiktok" / "post" / "catclips",
+    ]
+    preexisting = {path for path in derived_dirs if path.exists()}
     sources = [
         {"platform": "douyin", "account": "@dance2026",
          "url": "https://www.douyin.com/@dance2026"},
@@ -80,26 +88,35 @@ def test_sources_list_parsed_with_derived_values(tmp_path):
         # 第一个抖音源：f2_command 与下载目录都是按平台/账号推导的
         assert first["platform"] == "douyin"
         assert first["account"] == "@dance2026"
-        assert first["f2_command"] == ["f2", "dy"]
+        assert first["f2_command"] == ["f2", "dy", "-M", "post"]
         assert first["download_dir"] == REPO_ROOT / "Download" / "douyin" / "post" / "dance2026"
         assert first["main_command"][:2] == ["f2", "dy"]
         assert first["main_command"][-1] == "https://www.douyin.com/@dance2026"
         # 第二个源：显式写的值优先
         assert second["download_dir"] == dl2
-        assert second["f2_command"] == ["f2", "dy"]
+        # 配置里写了 ["f2", "dy"]，缺 mode 也会被补上
+        assert second["f2_command"] == ["f2", "dy", "-M", "post"]
         # 第三个 TikTok 源：同样按平台推导
-        assert third["f2_command"] == ["f2", "tk"]
+        assert third["f2_command"] == ["f2", "tk", "-M", "post"]
         assert third["download_dir"] == REPO_ROOT / "Download" / "tiktok" / "post" / "catclips"
         # 兼容旧属性恒等于第一个源
         assert cfg.SOURCE_PLATFORM == "douyin"
         assert cfg.SOURCE_ACCOUNT == "@dance2026"
         assert cfg.SOURCE_URL == "https://www.douyin.com/@dance2026"
-        assert cfg.F2_COMMAND == ["f2", "dy"]
+        assert cfg.F2_COMMAND == ["f2", "dy", "-M", "post"]
         assert cfg.MAIN_COMMAND == first["main_command"]
         assert cfg.DOWNLOAD_DIR == first["download_dir"]
         assert cfg.DOWNLOAD_DIRS == [s["download_dir"] for s in cfg.SOURCES]
     finally:
-        shutil.rmtree(REPO_ROOT / "Download", ignore_errors=True)
+        for path in derived_dirs:
+            if path in preexisting:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            for parent in (path.parent, path.parent.parent, path.parent.parent.parent):
+                try:
+                    parent.rmdir()  # 只删空目录，Download 里还有别的东西就留着
+                except OSError:
+                    break
 
 
 def test_legacy_single_source_builds_one_entry(tmp_path):
@@ -145,10 +162,11 @@ class _FakePopen:
 
 
 def _config_with_two_sources(tmp_path):
+    """两个 tiktok 源：走 f2 子进程那条分支（抖音现在走浏览器通道，见下面的用例）。"""
     sources = [
-        {"platform": "douyin", "account": "@a", "url": "https://www.douyin.com/@a",
+        {"platform": "tiktok", "account": "@a", "url": "https://www.tiktok.com/@a",
          "download_dir": str(tmp_path / "dl-a")},
-        {"platform": "douyin", "account": "@b", "url": "https://www.douyin.com/@b",
+        {"platform": "tiktok", "account": "@b", "url": "https://www.tiktok.com/@b",
          "download_dir": str(tmp_path / "dl-b")},
     ]
     return AppConfig(config_path=str(_write_sources_yaml(tmp_path, sources)))
@@ -167,10 +185,10 @@ def test_execute_main_command_runs_each_source(tmp_path, monkeypatch):
     success, forbidden = handler.execute_main_command("2026-11-12 10-00-00|2026-11-12 11-00-00")
     assert (success, forbidden) == (True, False)
     assert len(seen) == 2
-    assert seen[0][:2] == ["f2", "dy"]
-    assert seen[0][-4:] == ["-u", "https://www.douyin.com/@a", "-i",
+    assert seen[0][:2] == ["f2", "tk"]
+    assert seen[0][-4:] == ["-u", "https://www.tiktok.com/@a", "-i",
                             "2026-11-12 10-00-00|2026-11-12 11-00-00"]
-    assert seen[1][-3] == "https://www.douyin.com/@b"
+    assert seen[1][-3] == "https://www.tiktok.com/@b"
 
 
 def test_execute_main_command_aggregates_results(tmp_path, monkeypatch):
@@ -366,3 +384,167 @@ def test_load_video_mover_section_missing_file(tmp_path):
     mod = _load_douyin_upload()
     with pytest.raises(FileNotFoundError, match="找不到配置文件"):
         mod._load_video_mover_section(tmp_path / "no-such.yaml")
+
+
+# --------------------------------------------------------------------------
+# f2 下载模式：不带 -M 时 f2 0.0.1.7 直接报错退出
+# --------------------------------------------------------------------------
+def test_ensure_mode_appends_default():
+    import main as main_module
+
+    assert main_module._ensure_mode(["f2", "dy"]) == ["f2", "dy", "-M", "post"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["f2", "dy", "-M", "like"],
+        ["f2", "dy", "--mode", "one"],
+    ],
+)
+def test_ensure_mode_keeps_explicit_mode(command):
+    import main as main_module
+
+    assert main_module._ensure_mode(command) == command
+
+
+def test_ensure_mode_does_not_mutate_input():
+    import main as main_module
+
+    original = ["f2", "dy"]
+    main_module._ensure_mode(original)
+    assert original == ["f2", "dy"]
+
+def test_execute_main_command_routes_douyin_to_browser_fetcher(tmp_path, monkeypatch):
+    """抖音源不走 f2（会被 Argus 签名挡成 403），走 douyin_fetch 的浏览器通道。"""
+    from datetime import datetime
+
+    sources = [
+        {"platform": "douyin", "account": "@a", "url": "https://www.douyin.com/@a",
+         "download_dir": str(tmp_path / "dl-a")},
+        {"platform": "tiktok", "account": "@b", "url": "https://www.tiktok.com/@b",
+         "download_dir": str(tmp_path / "dl-b")},
+    ]
+    cfg = AppConfig(config_path=str(_write_sources_yaml(tmp_path, sources)))
+    handler = main_module.MainCommandHandler(cfg)
+
+    fetched = []
+    f2_calls = []
+
+    def fake_fetch(url, **kwargs):
+        fetched.append((url, kwargs))
+        return 3
+
+    monkeypatch.setattr(main_module.douyin_fetch, "fetch_and_download", fake_fetch)
+    monkeypatch.setattr(handler, "_run_command",
+                        lambda command: (f2_calls.append(command), (True, False))[1])
+
+    success, forbidden = handler.execute_main_command(
+        "2026-11-12 10-00-00|2026-11-12 11-00-00")
+
+    assert (success, forbidden) == (True, False)
+    assert fetched == [(
+        "https://www.douyin.com/@a",
+        {
+            "download_dir": cfg.SOURCES[0]["download_dir"],
+            "config_path": cfg.CONFIG_FILE,
+            "since": datetime(2026, 11, 12, 10, 0, 0),
+            "until": datetime(2026, 11, 12, 11, 0, 0),
+        },
+    )]
+    # 抖音源不产生 f2 子进程，只有 tiktok 源会
+    assert len(f2_calls) == 1
+    assert f2_calls[0][:2] == ["f2", "tk"]
+
+
+def test_execute_main_command_douyin_failure_does_not_break_others(tmp_path, monkeypatch):
+    sources = [
+        {"platform": "douyin", "account": "@a", "url": "https://www.douyin.com/@a",
+         "download_dir": str(tmp_path / "dl-a")},
+        {"platform": "tiktok", "account": "@b", "url": "https://www.tiktok.com/@b",
+         "download_dir": str(tmp_path / "dl-b")},
+    ]
+    cfg = AppConfig(config_path=str(_write_sources_yaml(tmp_path, sources)))
+    handler = main_module.MainCommandHandler(cfg)
+
+    def boom(url, **kwargs):
+        raise RuntimeError("浏览器起不来")
+
+    monkeypatch.setattr(main_module.douyin_fetch, "fetch_and_download", boom)
+    monkeypatch.setattr(handler, "_run_command", lambda command: (True, False))
+
+    # 抖音失败，tiktok 成功 -> 整体成功
+    assert handler.execute_main_command("t0|t1") == (True, False)
+
+
+# ------------------------------------------------------------------ 上传模式开关
+
+def test_apply_upload_options_defaults_to_headless():
+    mod = _load_douyin_upload()
+    environ = {}
+    opts = mod.apply_upload_options({}, environ)
+    assert opts == {"headless": True, "dry_run": False}
+    assert "DOUYIN_UPLOAD_HEADED" not in environ
+    assert "DOUYIN_UPLOAD_DRY_RUN" not in environ
+
+
+def test_apply_upload_options_reads_config():
+    mod = _load_douyin_upload()
+    environ = {}
+    opts = mod.apply_upload_options({"headless": False, "dry_run": "yes"}, environ)
+    assert opts == {"headless": False, "dry_run": True}
+    assert environ["DOUYIN_UPLOAD_HEADED"] == "1"
+    assert environ["DOUYIN_UPLOAD_DRY_RUN"] == "1"
+
+
+def test_apply_upload_options_env_can_only_make_it_safer():
+    mod = _load_douyin_upload()
+    # 配置要无窗口，但调试时设了 HEADED -> 有界面
+    opts = mod.apply_upload_options({"headless": True}, {"DOUYIN_UPLOAD_HEADED": "1"})
+    assert opts["headless"] is False
+    # 配置没开 dry_run，但一次性设了环境变量 -> 不发布
+    opts = mod.apply_upload_options({}, {"DOUYIN_UPLOAD_DRY_RUN": "1"})
+    assert opts["dry_run"] is True
+    # 反过来：环境变量不能把 dry_run 关掉
+    opts = mod.apply_upload_options({"dry_run": True}, {})
+    assert opts["dry_run"] is True
+
+
+def test_truthy_values():
+    mod = _load_douyin_upload()
+    for value in (True, "1", "true", "YES", "on", " yes "):
+        assert mod._truthy(value) is True, value
+    for value in (False, "0", "false", "no", "off", "", None, "2"):
+        assert mod._truthy(value) is False, value
+
+
+def test_find_desc_file_supports_nested_nickname_dir(tmp_path):
+    """抖音浏览器通道的落盘多一层昵称，描述文件也要能找到。"""
+    mod = _load_douyin_upload()
+    download_dir = tmp_path / "dl"
+    nested = download_dir / "杨超越" / "2026-11-12 11-00-25"
+    nested.mkdir(parents=True)
+    desc = nested / "2026-11-12 11-00-25_desc.txt"
+    desc.write_text("标题 #话题\n", encoding="utf-8")
+
+    video = tmp_path / "videos" / "2026-11-12 11-00-25_video.mp4"
+    video.parent.mkdir()
+    video.write_bytes(b"x")
+
+    assert mod.find_desc_file(video, [download_dir]) == desc
+    # 本层直接命中也要支持（f2 老结构）
+    flat = download_dir / "2026-11-12 11-00-25"
+    flat.mkdir(parents=True, exist_ok=True)
+    (flat / "2026-11-12 11-00-25_desc.txt").write_text("本层\n", encoding="utf-8")
+    assert mod.find_desc_file(video, [download_dir]).parent == flat
+
+
+def test_resolve_download_dirs_includes_parent_for_nickname_layout(tmp_path, monkeypatch):
+    """配置目录不存在、只有上一层（抖音浏览器通道的默认参数抓法）时也要能搜到。"""
+    mod = _load_douyin_upload()
+    mode_dir = tmp_path / "Download" / "douyin" / "post"
+    (mode_dir / "杨超越").mkdir(parents=True)
+    section = {"sources": [{"platform": "douyin", "account": "@a"}]}
+    dirs = mod._resolve_download_dirs(section, tmp_path)
+    # 配置推导出的是 <mode>/a（不存在），实际搜到的是它的上一层 <mode>
+    assert dirs == [mode_dir]
