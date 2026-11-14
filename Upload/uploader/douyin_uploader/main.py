@@ -698,6 +698,122 @@ class DouYinVideo(object):
                 await asyncio.sleep(1.5)
         return None
 
+    async def _use_ai_cover(self, page) -> bool:
+        """让平台用它 AI 生成的封面（自己传图失败时的兜底）。"""
+        modal = page.locator("div.dy-creator-content-modal-wrap").last
+        try:
+            await modal.get_by_role("button", name="AI生成封面").first.click(timeout=8000)
+            douyin_logger.info("  [-] 点“AI生成封面”，等平台生成…")
+            await asyncio.sleep(3)
+        except Exception as e:
+            douyin_logger.warning(f"  [-] 点不到“AI生成封面”: {e}")
+            return False
+        # 生成出来的封面会出现在列表里（aiGenCoverList-*），点第一张选中
+        for _ in range(20):
+            await asyncio.sleep(1.5)
+            try:
+                card = modal.locator("[class*='aiGenCoverList'] img, [class*='coverList'] img").first
+                if await card.count():
+                    await card.click(timeout=6000)
+                    await asyncio.sleep(1.5)
+                    douyin_logger.info("  [-] 已选中 AI 推荐封面")
+                    break
+            except Exception:
+                continue
+        done = modal.get_by_role("button", name="完成").first
+        for _ in range(20):
+            await asyncio.sleep(1.0)
+            try:
+                if await done.is_enabled():
+                    await done.click(timeout=8000)
+                    await asyncio.sleep(2.0)
+                    douyin_logger.success("  [-] 封面用了 AI 推荐图")
+                    return True
+            except Exception:
+                return False
+        return False
+
+    async def set_thumbnail(self, page: Page, thumbnail_path: str = "", horizontal_cover: str = ""):
+        """设置竖封面（3:4）；自己传图失败就退回平台 AI 推荐封面。
+
+        实测要点：
+        * 点“选择封面”打开 ``div.dy-creator-content-modal-wrap``，默认“设置竖封面”tab；
+        * 图片塞进 ``input.semi-upload-hidden-input`` 后，“完成”一开始是 disabled
+          （编辑器还在处理），要轮询到可用再点；
+        * 打不开弹窗时用 JS 直接点“选择封面”叶子节点（Playwright 的可点性检查被
+          浮层挡住会一直超时）；
+        * 判断设上没有看页面提示（``封面效果检测通过``），不看自己的日志。
+        旧实现的 ``semi-modal-content`` / ``extractFooter`` 选择器早已失效，
+        相当于从来没设上过封面。横封面不再强求（用户要求只要竖封面）。
+        """
+        if not thumbnail_path:
+            return
+        modal = await self._reopen_cover_modal(page)
+        if modal is None:
+            douyin_logger.warning("  [-] 打不开封面弹窗，跳过设置封面")
+            return
+        ok = False
+        if await self._upload_cover_in_modal(page, thumbnail_path):
+            ok = True
+            douyin_logger.info("  [-] 竖封面已设置")
+        else:
+            douyin_logger.warning("  [-] 自己传封面失败，改用 AI 推荐封面")
+            ok = await self._use_ai_cover(page)
+        try:
+            for _ in range(3):
+                visible_modal = page.locator("div.dy-creator-content-modal-wrap").last
+                if not (await visible_modal.count() and await visible_modal.is_visible()):
+                    break
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(1.2)
+            douyin_logger.success(
+                f"  [-] 封面已处理（{'成功' if ok else '没设上'}；"
+                f"页面提示: {await self._cover_warning(page) or '无'}）"
+            )
+        except Exception:
+            pass
+
+    async def _cover_warning(self, page) -> str:
+        """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""
+        try:
+            body = await page.locator("body").inner_text()
+        except Exception:
+            return ""
+        lines = [l.strip() for l in body.splitlines() if "封面" in l]
+        for line in lines:
+            if "缺失" in line or "检测通过" in line or "低质" in line:
+                return line[:40]
+        return " ".join(lines)[:40]
+
+    async def _reopen_cover_modal(self, page, attempts: int = 3):
+        """打开（或复用）封面弹窗。
+
+        注意必须判断“真的可见”：弹窗关掉后 DOM 里可能还留着隐藏的
+        ``dy-creator-content-modal-wrap``，只看 count>0 会拿到一个隐藏元素，
+        后面的点击全部 30 秒超时。
+        """
+        modal = page.locator("div.dy-creator-content-modal-wrap").last
+        for _ in range(attempts):
+            try:
+                if await modal.count() and await modal.is_visible():
+                    return modal
+            except Exception:
+                pass
+            try:
+                await page.evaluate(
+                    """() => {
+                      const els = [...document.querySelectorAll('div,span')]
+                          .filter(e => !e.children.length
+                                  && (e.innerText || '').trim() === '选择封面' && e.offsetParent);
+                      if (els.length) els[0].click();
+                    }"""
+                )
+                await modal.wait_for(state="visible", timeout=8000)
+                return modal
+            except Exception:
+                await asyncio.sleep(1.5)
+        return None
+
     async def set_thumbnail(self, page: Page, thumbnail_path: str = "", horizontal_cover: str = ""):
         """设置竖/横封面（抖音会提示“横/竖双封面缺失”，两个都设曝光更好）。
 

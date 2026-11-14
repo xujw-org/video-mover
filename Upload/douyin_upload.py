@@ -281,22 +281,22 @@ async def upload_one(video_path, title, tags, account_file, cover_dir=None, hot_
     # 延迟导入：本脚本的纯函数（标题解析等）被测试导入时不需要 playwright。
     from uploader.douyin_uploader.main import DouYinVideo
 
-    # 抖音发布页要横/竖两张封面，不设会提示“横/竖双封面缺失”、曝光也差。
-    # 这里从视频里截一帧生成两张，失败就不设封面（不阻塞发布）。
-    cover_path, horizontal_cover = None, None
+    # 只要竖封面（3:4）：抖音会用它做推荐流封面；横封面不强求，实在设不上
+    # 就退回让平台用 AI 推荐的封面（见 uploader 里的 _use_ai_cover）。
+    cover_path = None
     try:
-        from cover import make_covers
+        from cover import VERTICAL_SIZE, make_cover
 
         cover_dir = Path(cover_dir) if cover_dir else Path(video_path).parent / ".covers"
-        covers = make_covers(video_path, cover_dir)
-        cover_path = str(covers["vertical"])
-        horizontal_cover = str(covers["horizontal"])
+        cover_path = str(make_cover(
+            video_path, cover_dir / f"{Path(video_path).stem}_cover_3x4.jpg", VERTICAL_SIZE
+        ))
     except Exception as e:
         print(f"生成封面失败（继续不设封面）: {e}")
 
     app = DouYinVideo(
         title=title, file_path=video_path, tags=tags, publish_date=0, account_file=account_file,
-        thumbnail_path=cover_path, horizontal_cover_path=horizontal_cover,
+        thumbnail_path=cover_path,
         hot_tags=hot_tags,
     )
     await app.main()
