@@ -49,7 +49,8 @@ def _quiet_config(tmp_path):
 
 
 # 滤镜链最后总会挂一个限制器（防止 0dBFS 素材削顶），单独拿出来便于断言。
-LIMITER = ("filter", ("alimiter",), {"limit": 0.89})
+# level=0 必须显式给：默认 level=1 会把峰值自动抬回 0dBFS，等于没限幅。
+LIMITER = ("filter", ("alimiter",), {"limit": 0.89, "level": 0})
 
 
 def _filters(ffmpeg):

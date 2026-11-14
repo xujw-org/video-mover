@@ -70,3 +70,6 @@ douyin_users.db
 
 # 本地编辑器配置
 .vscode/
+
+# A/B 试听样本
+samples/

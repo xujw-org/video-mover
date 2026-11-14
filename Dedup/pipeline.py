@@ -260,8 +260,10 @@ class VideoHandler:
         if tempo != 1.0:
             stream = stream.filter('atempo', round(tempo, 4))
         # 抖音原声常常已经顶到 0dBFS，混 BGM / 变调 / 变速之后再进 AAC 很容易削顶，
-        # 削顶听感上是“糊/撕裂”。留 1dB 余量，用限制器挡一下。
-        stream = stream.filter('alimiter', limit=0.89)
+        # 削顶听感上是“糊/撕裂/噪音”。留 1dB 余量，用限制器挡一下。
+        # level=0 必须显式给：ffmpeg 的 alimiter 默认 level=1（auto level），
+        # 会把压下去的峰值又自动抬回来，实测峰值仍是 0.00dBFS（等于没限幅）。
+        stream = stream.filter('alimiter', limit=0.89, level=0)
         return stream
 
     def _frame_generator(self, cap: cv2.VideoCapture) -> Generator[Tuple[int, np.ndarray], None, None]:
