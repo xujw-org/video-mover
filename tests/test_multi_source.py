@@ -372,12 +372,13 @@ def test_resolve_download_dirs(tmp_path):
             {"platform": "douyin", "account": "@missing"},  # 推导出的目录不存在，跳过
         ]
     }
-    assert mod._resolve_download_dirs(section, tmp_path) == [dl_a]
+    # 配置目录 + 它的上一层（手动 CLI 抓的作品落在 <mode>/<昵称>/<时间>/）
+    assert mod._resolve_download_dirs(section, tmp_path) == [dl_a, tmp_path]
     # 旧版单 source：回落到 paths.download_dir
     dl_old = tmp_path / "dl-old"
     dl_old.mkdir()
     assert mod._resolve_download_dirs(
-        {"paths": {"download_dir": str(dl_old)}}, tmp_path) == [dl_old]
+        {"paths": {"download_dir": str(dl_old)}}, tmp_path) == [dl_old, tmp_path]
 
 
 def test_load_video_mover_section_missing_file(tmp_path):

@@ -29,6 +29,8 @@ import asyncio
 import os
 import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 # 标题往往带 emoji（抖音作品 desc 原样带过来），Windows 控制台默认 cp936，
@@ -53,6 +55,49 @@ COOKIES_DIR = Path(BASE_DIR) / "cookies"
 MAX_TITLE_LEN = 30  # 抖音标题上限 30 字，DouYinVideo 内部也会截断，这里先截好方便打日志
 MAX_TAGS = 10
 _TAG_RE = re.compile(r"#([^\s#]+)")
+# 发布节奏：两次发布至少间隔这么多分钟（默认 15）。抖音对“短时间连续发布”
+# 很不友好，连着发几条很容易被判异常。状态存在文件里，跨进程/跨轮次都生效。
+DEFAULT_MIN_INTERVAL_MINUTES = 15
+PUBLISH_STATE_FILE = "Upload/.last_publish"
+TIME_FMT_LOCAL = "%Y-%m-%d %H:%M:%S"
+
+
+def read_last_publish(state_path) -> float | None:
+    """上次发布成功的 Unix 时间戳；没有记录返回 None。"""
+    try:
+        text = Path(state_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        # 兼容手写的可读时间
+        for fmt in (TIME_FMT_LOCAL, "%Y-%m-%d %H-%M-%S"):
+            try:
+                return datetime.strptime(text, fmt).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def publish_gate(min_interval_minutes: float, state_path, now: float | None = None) -> tuple[bool, float]:
+    """现在能不能发：返回 (是否允许, 还差多少分钟)。"""
+    now = time.time() if now is None else now
+    last = read_last_publish(state_path)
+    if last is None:
+        return True, 0.0
+    remaining = min_interval_minutes - (now - last) / 60.0
+    if remaining > 0:
+        return False, remaining
+    return True, 0.0
+
+
+def record_publish(state_path, now: float | None = None) -> None:
+    """记一笔发布成功的时间。"""
+    now = time.time() if now is None else now
+    path = Path(state_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{now:.3f}", encoding="utf-8")
 
 
 def _truthy(value) -> bool:
@@ -141,14 +186,12 @@ def _resolve_download_dirs(section, repo_root):
         # <配置目录>/<昵称>/<时间>/）；配置目录不存在时退一层——手动用
         # douyin_fetch.py 默认参数抓的历史作品落在 Download/douyin/post/<昵称>/<时间>/，
         # 正好是配置目录的上一层。
-        if path.is_dir():
-            candidate = path
-        elif path.parent.is_dir():
-            candidate = path.parent
-        else:
-            continue
-        if candidate not in dirs:
-            dirs.append(candidate)
+        # 两个都算：配置的账号目录（浏览器通道落盘 <账号>/<昵称>/<时间>/），
+        # 以及它的上一层（手动 CLI 抓的落在 <post>/<昵称>/<时间>/）。
+        # 以前是“谁存在用谁”，配置目录被别的流程建出来（哪怕空着）就找不到描述文件了。
+        for candidate in (path, path.parent):
+            if candidate.is_dir() and candidate not in dirs:
+                dirs.append(candidate)
     return dirs
 
 
@@ -158,7 +201,11 @@ def parse_desc_text(text):
     第一行非空行当标题（超长截断到 30 字）；全文里的 #话题 依次去重，最多 MAX_TAGS 个。
     """
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    title = lines[0][:MAX_TITLE_LEN] if lines else ""
+    raw_title = lines[0] if lines else ""
+    # 标题里的 #话题 会作为话题单独添加，留在标题里既浪费 30 字上限、又会被当成正文
+    # （实测描述是单行 "🖤💖 #Moonride" 时，标题和话题都混在一起）
+    stripped_title = re.sub(r"\s{2,}", " ", _TAG_RE.sub("", raw_title)).strip()
+    title = (stripped_title or raw_title)[:MAX_TITLE_LEN]
     tags = []
     for tag in _TAG_RE.findall(text or ""):
         tag = tag.strip()
@@ -273,8 +320,18 @@ async def run(video_dir=VIDEO_DIR, config_path=None, repo_root=None):
     options = apply_upload_options(upload_cfg)
     print(f"上传模式：{'无窗口' if options['headless'] else '有界面'}"
           + ("（dry_run：不真正发布）" if options["dry_run"] else ""))
+    min_interval = float(upload_cfg.get("min_interval_minutes", DEFAULT_MIN_INTERVAL_MINUTES) or 0)
+    state_path = Path(BASE_DIR) / ".last_publish"
     failed, succeeded = [], []
     for video_path in videos:
+        if not options["dry_run"]:
+            allowed, wait_min = publish_gate(min_interval, state_path)
+            if not allowed:
+                print(
+                    f"距上次发布会不足 {min_interval:g} 分钟（还差 {wait_min:.1f} 分钟），"
+                    f"本轮不再上传；剩下的视频保留在 {video_dir}"
+                )
+                break
         title, tags = resolve_title_tags(video_path, download_dirs)
         print(f"上传: {video_path.name} 标题: {title} 话题: {tags}")
         try:
@@ -284,6 +341,9 @@ async def run(video_dir=VIDEO_DIR, config_path=None, repo_root=None):
             failed.append(video_path)
             continue
         succeeded.append(video_path)
+        if not options["dry_run"]:
+            # 记一笔，保证同一轮里也不会连着发第二条
+            record_publish(state_path)
 
     if options["dry_run"]:
         # dry_run 下没真的发布，文件不能删

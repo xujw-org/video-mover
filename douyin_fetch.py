@@ -611,6 +611,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--headful", action="store_true", help="显示浏览器窗口")
     parser.add_argument("--dry-run", action="store_true", help="只列计划不下载")
     parser.add_argument("--max-scrolls", type=int, default=25, help="最多滚动次数")
+    parser.add_argument("--max-items", type=int, default=None,
+                        help="最多下载多少条（补抓历史时控制磁盘/时间）")
     parser.add_argument("--ignore-https-errors", action="store_true",
                         help="放行自签证书（走 Burp/mitmproxy 调试时需要）")
     args = parser.parse_args(argv)
@@ -633,6 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         max_scrolls=args.max_scrolls,
         ignore_https_errors=args.ignore_https_errors,
+        max_items=args.max_items,
     )
     logging.info("完成，处理 %s 条视频", count)
     return 0

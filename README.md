@@ -280,6 +280,21 @@ video_mover:
 4. 是不是同时开了多个自动发布（短时间连着发多条，容易被风控盯上）；
 5. 环境变量 `DOUYIN_UPLOAD_UA` 有没有被设成奇怪的 UA。
 
+### 发布节奏与短信验证
+
+`video_mover.upload.min_interval_minutes`（默认 15）限制两次发布的最小间隔，
+状态写在 `Upload/.last_publish`，不够间隔就跳过本轮（视频留在 `Upload/videos`）。
+
+抖音对“新设备上的第一次发布”常常要求**短信验证码**（为确保是本人操作）。
+这种人工步骤自动化做不了，所以第一次遇到时用有界面模式跑：
+
+```bash
+set DOUYIN_UPLOAD_HEADED=1
+python Upload/douyin_upload.py
+```
+
+窗口里输入手机收到的验证码后脚本会自动继续；之后同一会话通常不再要求。
+
 ### 临时文件位置
 
 Dedup 的中间音频放在仓库的 `tmp/`（与项目同盘，默认 D 盘），不再落到

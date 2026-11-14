@@ -222,19 +222,82 @@ class DouYinVideo(object):
         创作者中心会弹“视频预览功能”之类的气泡（带一个“我知道了”按钮），
         它会盖住底部按钮，导致“发布”点了没反应（本机实测：点了几十次都没发出去）。
         """
-        for text in ("我知道了", "知道了", "暂不需要"):
+        # 创作者中心会弹不止一种浮层：
+        #   * “视频预览功能 … [我知道了]”
+        #   * “Hi，我是发文助手 …” （右侧面板，会拦住“发布”按钮的点击）
+        for text in ("我知道了", "知道了", "暂不需要", "关闭", "取消", "暂不", "以后再说", "跳过"):
             try:
                 button = page.get_by_text(text, exact=True)
                 if await button.count():
-                    await button.first.click(timeout=2000)
-                    douyin_logger.info(f"  [-] 关掉引导浮层：{text}")
-                    await asyncio.sleep(0.5)
+                    await button.first.click(timeout=1500)
+                    douyin_logger.info(f"  [-] 关掉浮层：{text}")
+                    await asyncio.sleep(0.4)
             except Exception:
                 continue
         try:
             await page.keyboard.press("Escape")
         except Exception:
             pass
+
+    async def _sms_modal_visible(self, page) -> bool:
+        """发布时抖音可能要求“短信验证码”（为确保是本人操作账号）。"""
+        for text in ("接收短信验证码", "请输入当前手机号", "选择其他验证方式"):
+            try:
+                if await page.get_by_text(text, exact=False).count():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_for_manual_code(self, page, timeout_seconds: int = 600) -> bool:
+        """等人工在窗口里填验证码（只在有界面模式下有意义）。"""
+        douyin_logger.warning(
+            "  [-] 抖音要求短信验证码：请在打开的浏览器窗口里输入手机收到的验证码，"
+            f"最多等你 {timeout_seconds // 60} 分钟，输入完脚本会自动继续"
+        )
+        deadline = time.time() + timeout_seconds
+        last_note = 0.0
+        while time.time() < deadline:
+            if not await self._sms_modal_visible(page):
+                douyin_logger.info("  [-] 验证码已通过，继续发布")
+                return True
+            if time.time() - last_note > 30:
+                douyin_logger.info("  [-] 仍在等待验证码输入…")
+                last_note = time.time()
+            await asyncio.sleep(3)
+        return False
+
+    async def _already_on_manage(self, page, timeout_seconds: float = 0) -> bool:
+        """是否已经跳到作品管理页（=发布成功）。
+
+        只用 URL 判断，不依赖 locator：验证码通过后抖音会自己跳转，此时再拿旧
+        locator 去 evaluate 会等导航结束而超时（实测把成功误报成失败）。
+        """
+        if timeout_seconds:
+            try:
+                await page.wait_for_url(
+                    "**/creator-micro/content/manage**", timeout=int(timeout_seconds * 1000))
+            except Exception:
+                pass
+        try:
+            return "creator-micro/content/manage" in page.url
+        except Exception:
+            return False
+
+    async def _click_publish(self, page, publish_button) -> None:
+        """点“发布”：浮层挡住时关浮层再改用元素点击。"""
+        try:
+            await publish_button.first.click(timeout=8000)
+            return
+        except Exception:
+            pass
+        try:
+            douyin_logger.warning("  [-] 发布按钮被浮层挡住，改用元素点击")
+            await self._dismiss_guides(page)
+            await publish_button.first.evaluate("el => el.click()")
+        except Exception:
+            # evaluate 也可能因为“正好在导航”超时，交给后面的 URL 判断
+            douyin_logger.info("  [-] 元素点击超时，直接检查页面是否已跳转")
 
     async def publish_video(self, page) -> None:
         """点“发布”并确认结果；最多试 3 次，失败就报错，不无限重试。
@@ -243,26 +306,54 @@ class DouYinVideo(object):
         遇到引导浮层遮住按钮时就永远在循环里狂点发布。
         """
         await self._dismiss_guides(page)
+        # 有的账号发布前就被要求先做短信验证（弹窗直接挡在上面）
+        if await self._sms_modal_visible(page):
+            if upload_headless():
+                raise RuntimeError(
+                    "抖音要求短信验证码，但当前是无窗口模式，没法人工输入。"
+                    "请用有界面模式重跑：set DOUYIN_UPLOAD_HEADED=1 && "
+                    "python Upload/douyin_upload.py"
+                )
+            if not await self._wait_for_manual_code(page):
+                raise RuntimeError("等待短信验证码超时（10 分钟），本次不发布")
+            await self._dismiss_guides(page)
+
         publish_button = page.get_by_role('button', name="发布", exact=True)
         if not await publish_button.count():
             raise RuntimeError("抖音发布未成功：页面上找不到“发布”按钮（引导浮层？）")
         # 只点一次。重复点发布在抖音风控里是明显的机器特征（旧代码曾经 while True
         # 狂点几十次），点完没反应就截图、报错、交给人工，不再自己重试。
-        await publish_button.first.click()
-        try:
-            await page.wait_for_url("**/creator-micro/content/manage**", timeout=20000)
+        await self._click_publish(page, publish_button)
+        if await self._already_on_manage(page, 20):
             douyin_logger.success("  [-]视频发布成功")
             return
+
+        # 点完发布才冒出验证码弹窗的情况：等人工输入，通过后抖音通常自己就发布了
+        if await self._sms_modal_visible(page):
+            if upload_headless():
+                raise RuntimeError(
+                    "抖音要求短信验证码才能发布；无窗口模式无法输入。"
+                    "请用 set DOUYIN_UPLOAD_HEADED=1 重跑，在窗口里输入验证码。"
+                )
+            if await self._wait_for_manual_code(page):
+                if await self._already_on_manage(page, 30):
+                    douyin_logger.success("  [-]视频发布成功（验证码通过）")
+                    return
+                await self._click_publish(page, publish_button)
+                if await self._already_on_manage(page, 30):
+                    douyin_logger.success("  [-]视频发布成功（验证码通过）")
+                    return
+            raise RuntimeError("短信验证码通过后仍未发布成功，请到创作者中心手动确认")
+
+        shot = str(self.file_path) + ".publish_failed.png"
+        try:
+            await page.screenshot(path=shot, full_page=True)
         except Exception:
-            shot = str(self.file_path) + ".publish_failed.png"
-            try:
-                await page.screenshot(path=shot, full_page=True)
-            except Exception:
-                shot = "(截图失败)"
-            raise RuntimeError(
-                "抖音发布未成功：点击“发布”后 20 秒内没有跳转到作品管理页"
-                f"（截图: {shot}）。为避免触发风控，已停止重试。"
-            )
+            shot = "(截图失败)"
+        raise RuntimeError(
+            "抖音发布未成功：点击“发布”后 20 秒内没有跳转到作品管理页"
+            f"（截图: {shot}）。为避免触发风控，已停止重试。"
+        )
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例（默认无窗口，见 upload_headless）
