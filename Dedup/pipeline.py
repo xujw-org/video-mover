@@ -250,13 +250,18 @@ class VideoHandler:
         pitch_applied = False
         if config.pitch_shift != 1.0 and sample_rate:
             new_rate = int(sample_rate * config.pitch_shift)
+            # asetrate 同时改采样率和音调，接着 aresample 回原采样率；
+            # 显式指定 soxr，重建误差比默认 swr 更小。
             stream = stream.filter('asetrate', new_rate)
-            stream = stream.filter('aresample', int(sample_rate))
+            stream = stream.filter('aresample', int(sample_rate), resampler='soxr')
             pitch_applied = True
         tempo = config.playback_speed / config.pitch_shift if pitch_applied \
             else config.playback_speed
         if tempo != 1.0:
             stream = stream.filter('atempo', round(tempo, 4))
+        # 抖音原声常常已经顶到 0dBFS，混 BGM / 变调 / 变速之后再进 AAC 很容易削顶，
+        # 削顶听感上是“糊/撕裂”。留 1dB 余量，用限制器挡一下。
+        stream = stream.filter('alimiter', limit=0.89)
         return stream
 
     def _frame_generator(self, cap: cv2.VideoCapture) -> Generator[Tuple[int, np.ndarray], None, None]:

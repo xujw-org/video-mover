@@ -335,9 +335,14 @@ class _FakeAudioSegment:
         seg.ops.append(("overlay", loop))
         return seg
 
+    def __len__(self):
+        # 与 pydub 一致：len(AudioSegment) 返回毫秒数
+        return self.duration_ms
+
     def __add__(self, other):
         seg = _FakeAudioSegment()
         seg.ops.append(("add", other))
+        seg.duration_ms = self.duration_ms + getattr(other, "duration_ms", 0)
         return seg
 
     def __sub__(self, other):

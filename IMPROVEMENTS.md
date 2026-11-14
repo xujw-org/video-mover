@@ -288,12 +288,53 @@ headless 直接进上传页 → `python Upload/douyin_upload.py`：
 新作品状态“审核中”。**整条链路（抓取 → 下载 → 去重 → 发布）第一次全自动跑通，
 全程无窗口。**
 
-### 9. 验证结果（2026-11-14，本机 dy）
+### 9. BGM 有噪音：pydub 的线性插值重采样（已修）
+
+用户反馈成品 BGM 有噪音、听感差。定位到 `AudioHandler.mix_bgm` 用 pydub：
+`AudioSegment.overlay` 要求两段采样率一致，于是原音（44.1k）被转成 BGM 的
+48k，而 pydub 底下是 `audioop.ratecv`——**线性插值重采样，没有抗镜像滤波**。
+
+用 1kHz 正弦做的量化对比（看基频之外的杂散）：
+
+| 处理 | 1000Hz 基频外最大杂散 | 平均杂散 |
+| --- | --- | --- |
+| 原始 44.1k（参考） | -92.8 dB | -128.4 dB |
+| pydub / audioop 升采样到 48k | **-65.4 dB** | -104.4 dB |
+| ffmpeg swr | -93.8 dB | -125.5 dB |
+| ffmpeg soxr | -92.1 dB | -125.2 dB |
+
+也就是说 pydub 混音会凭空多出 27dB 的杂散能量，听感就是一层“滋滋”声。
+
+修法（`Dedup/audio.py`）：
+
+1. `mix_bgm` 改成**直接跑 ffmpeg**：`-stream_loop -1` 铺满 BGM →
+   `[1:a]volume=<dB>` → `amix=inputs=2:duration=first:normalize=0`。
+   全程保持原采样率，一次 resample 都不做。
+   `normalize=0` 是关键：ffmpeg 的 amix 默认会按输入路数把声音减半。
+2. 中间结果写 **float wav**（`pcm_f32le`）：原声常常已经 0dBFS，叠加 BGM 会短暂
+   超过满量程，写整型就是硬削顶（另一种“糊/毛刺”）。
+3. 变调那步的 `aresample` 显式用 `resampler=soxr`；链路末尾加
+   `alimiter=limit=0.89`，把峰值压在 -1dBFS 附近再进 AAC。
+4. 顺带修一个隐患：`remove_silence` 拼接掉静音后音频变短，但视频没同步剪，
+   会音画错位；更重要的是最后混流用了 `-shortest`，视频会被音频**截短**。
+   现在拼完用静音补齐回原时长。
+
+实测（同一段 4K 素材走完整流水线）：输出音频 44.1kHz / 时长 8.707s（与视频一致）、
+峰值 -0.5dBFS、**超过满量程的样本 0 个**。
+
+已知限制：BGM 只有 16 秒，视频更长时靠 `-stream_loop` 循环，接缝处没有交叉淡化
+（可能有轻微咔哒）。需要的话可以加“循环点 30ms 淡化”。
+
+新增/更新测试：ffmpeg 混音的滤镜串必须包含 `normalize=0` 与分贝增益、
+中间结果必须是 `pcm_f32le`、混音失败要抛错、静音处理后必须补齐时长；
+变调链断言 `resampler=soxr` 与结尾限制器。
+
+### 10. 验证结果（2026-11-14，本机 dy）
 
 - `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
   firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
 - `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
-- `pytest -q`：**203 passed**（原 152 + 17 个 win_env 测试 + 5 个
+- `pytest -q`：**205 passed**（原 152 + 17 个 win_env 测试 + 5 个
   `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
 - `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
   均无解析器报错，中文显示正常。

@@ -48,6 +48,10 @@ def _quiet_config(tmp_path):
     return config
 
 
+# 滤镜链最后总会挂一个限制器（防止 0dBFS 素材削顶），单独拿出来便于断言。
+LIMITER = ("filter", ("alimiter",), {"limit": 0.89})
+
+
 def _filters(ffmpeg):
     return [c for c in ffmpeg.calls if c[0] == "filter"]
 
@@ -58,7 +62,8 @@ def test_audio_effects_defaults_add_no_filter():
     stream = ffmpeg.input("x.wav")
     out = VideoHandler._apply_audio_effects(stream, VideoConfig(), 48000)
     assert out is stream
-    assert _filters(ffmpeg) == []
+    # 默认参数不加音色滤镜，但限制器始终在（防削顶）
+    assert _filters(ffmpeg) == [LIMITER]
 
 
 def test_audio_effects_none_stream_returns_none():
@@ -73,7 +78,7 @@ def test_audio_effects_volume_only():
     config.audio_volume = 1.05
     out = VideoHandler._apply_audio_effects(stream, config, 48000)
     assert out is stream  # 替身 filter 返回 self
-    assert _filters(ffmpeg) == [("filter", ("volume", 1.05), {})]
+    assert _filters(ffmpeg) == [("filter", ("volume", 1.05), {}), LIMITER]
 
 
 def test_audio_effects_speed_only_uses_atempo():
@@ -83,7 +88,7 @@ def test_audio_effects_speed_only_uses_atempo():
     config = VideoConfig()
     config.playback_speed = 1.05
     VideoHandler._apply_audio_effects(stream, config, 48000)
-    assert _filters(ffmpeg) == [("filter", ("atempo", 1.05), {})]
+    assert _filters(ffmpeg) == [("filter", ("atempo", 1.05), {}), LIMITER]
 
 
 def test_audio_effects_pitch_only():
@@ -97,8 +102,9 @@ def test_audio_effects_pitch_only():
     # atempo(1/1.02≈0.9804) 把时长补回原时长。
     assert _filters(ffmpeg) == [
         ("filter", ("asetrate", 48960), {}),
-        ("filter", ("aresample", 48000), {}),
+        ("filter", ("aresample", 48000), {"resampler": "soxr"}),
         ("filter", ("atempo", 0.9804), {}),
+        LIMITER,
     ]
 
 
@@ -113,8 +119,9 @@ def test_audio_effects_pitch_and_speed_combined():
     # atempo 因子是 speed/pitch = 1.05/1.02 ≈ 1.0294，不是 1.05。
     assert _filters(ffmpeg) == [
         ("filter", ("asetrate", 48960), {}),
-        ("filter", ("aresample", 48000), {}),
+        ("filter", ("aresample", 48000), {"resampler": "soxr"}),
         ("filter", ("atempo", 1.0294), {}),
+        LIMITER,
     ]
 
 
@@ -125,8 +132,8 @@ def test_audio_effects_pitch_skipped_without_sample_rate():
     config = VideoConfig()
     config.pitch_shift = 1.02
     VideoHandler._apply_audio_effects(stream, config, None)
-    # 拿不到采样率就跳过变调，tempo 只按速度走（这里速度是 1.0，无滤镜）。
-    assert _filters(ffmpeg) == []
+    # 拿不到采样率就跳过变调，tempo 只按速度走（这里速度是 1.0，只剩限制器）。
+    assert _filters(ffmpeg) == [LIMITER]
 
 
 def test_process_video_speed_fps_split(tmp_path, monkeypatch):
