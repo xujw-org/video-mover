@@ -80,6 +80,8 @@ DEFAULT_CONFIG = {
         "upload_script": "Upload/douyin_upload.py",
     },
     "schedule": {"interval_minutes": 300, "timezone": "Asia/Singapore"},
+    # 补抓历史（队列模式）：days=0 表示关闭，走原来的滚动时间窗。
+    "backfill": {"days": 0, "max_per_source": 20, "max_per_run": 3},
     "runtime": {"max_workers": None, "config_file": "my_apps.yaml"},
 }
 
@@ -266,6 +268,8 @@ class AppConfig:
             raise ValueError(
                 f"schedule.interval_minutes 必须是 1-1440 之间的整数，当前值: {self.SCHEDULE_INTERVAL}")
 
+        self._parse_backfill(section.get("backfill", {}) or {}, defaults)
+
         self.TIMEZONE = str(self._get(schedule, "timezone", "TIMEZONE", defaults["schedule"]["timezone"]))
         try:
             ZoneInfo(self.TIMEZONE)
@@ -287,6 +291,55 @@ class AppConfig:
                 raise ValueError(f"runtime.max_workers 必须是正整数，当前值: {max_workers_raw!r}")
             if self.MAX_WORKERS < 1:
                 raise ValueError(f"runtime.max_workers 必须是正整数，当前值: {self.MAX_WORKERS}")
+
+    def _parse_backfill(self, backfill: dict, defaults: dict) -> None:
+        """解析 video_mover.backfill（补抓历史 / 队列模式）。
+
+        days            抓多少天的历史作品，0 = 关闭（走原来的滚动时间窗）
+        max_per_source  单次每个源最多下载多少条
+        max_per_run     每轮最多处理（去重）多少条待办，避免一轮跑几小时
+
+        补抓开启后，去重阶段改看“未处理队列”：Download 里所有没被处理过的
+        作品都会排队，不再受 5 小时时间窗限制；处理成功的记到
+        state/processed.json，不会重复处理。
+        """
+        conf = dict(defaults["backfill"])
+        conf.update({k: v for k, v in backfill.items() if v is not None})
+
+        def pick(key, env_suffix, default):
+            env_name = f"{ENV_PREFIX}{env_suffix}"
+            if os.environ.get(env_name):
+                return os.environ[env_name]
+            if key in backfill and backfill[key] is not None:
+                return backfill[key]
+            logging.warning(
+                f"配置缺失: video_mover.backfill.{key}（环境变量 {env_name}），使用默认值: {default!r}")
+            return default
+
+        raw_days = pick("days", "BACKFILL_DAYS", conf["days"])
+        try:
+            self.BACKFILL_DAYS = int(raw_days)
+        except (TypeError, ValueError):
+            raise ValueError(f"backfill.days 必须是整数，当前值: {raw_days!r}")
+        if not 0 <= self.BACKFILL_DAYS <= 365:
+            raise ValueError(
+                f"backfill.days 必须在 0-365 之间（0=关闭补抓），当前值: {self.BACKFILL_DAYS}")
+
+        for attr, key, env, low in (
+            ("BACKFILL_MAX_PER_SOURCE", "max_per_source", "BACKFILL_MAX_PER_SOURCE", 1),
+            ("BACKFILL_MAX_PER_RUN", "max_per_run", "BACKFILL_MAX_PER_RUN", 1),
+        ):
+            raw = pick(key, env, conf[key])
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"backfill.{key} 必须是整数，当前值: {raw!r}")
+            if value < low:
+                raise ValueError(f"backfill.{key} 必须 >= {low}，当前值: {value}")
+            setattr(self, attr, value)
+
+        self.STATE_DIR = self.DEDUP_DIR.parent / "state"
+        self.STATE_FILE = self.STATE_DIR / "processed.json"
 
     @staticmethod
     def _get(section: dict, key: str, env_suffix: str, default):
@@ -441,12 +494,88 @@ class FileManager(HandlerBase):
             logging.error(f"时间范围解析失败: {e}")
             return 0
 
-        video_files = self._get_video_files(start_time, end_time)
+        backfill = getattr(self.config, "BACKFILL_DAYS", 0) > 0
+        if backfill:
+            # 补抓模式：不看时间窗，按“未处理队列”走，每轮只吃 max_per_run 条，
+            # 免得一开就跑几个小时、磁盘也顶不住。
+            limit = getattr(self.config, "BACKFILL_MAX_PER_RUN", 3)
+            video_files = self._get_pending_files(limit)
+            logging.info(
+                f"补抓模式：本轮从待办队列取 {len(video_files)} 条"
+                f"（每轮上限 {limit}）"
+            )
+        else:
+            video_files = self._get_video_files(start_time, end_time)
+
         with ThreadPoolExecutor(max_workers=self.config.MAX_WORKERS) as executor:
             futures = [executor.submit(self._process_video, file) for file in video_files]
-            total_processed = sum(f.result() for f in futures if f.result() is not None)
+            done = [file for file, future in zip(video_files, futures) if future.result()]
+        total_processed = len(done)
+        if backfill:
+            for file in done:
+                self._record_processed(file)
         logging.info(f"已处理 {total_processed} 个视频")
         return total_processed
+
+    # ------------------------------------------------------------------ 补抓队列
+    def _load_processed(self) -> dict:
+        """读 state/processed.json：{相对路径: 处理时间}。"""
+        state_file = getattr(self.config, "STATE_FILE", None)
+        if not state_file or not Path(state_file).is_file():
+            return {}
+        try:
+            import json
+
+            with open(state_file, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError) as exc:
+            logging.warning(f"读取处理状态失败（按空处理）: {exc}")
+            return {}
+
+    def _record_processed(self, path: Path) -> None:
+        """把处理成功的作品记进 state/processed.json。"""
+        state_file = getattr(self.config, "STATE_FILE", None)
+        if not state_file:
+            return
+        state_file = Path(state_file)
+        data = self._load_processed()
+        try:
+            key = str(Path(path).resolve().relative_to(Path(__file__).parent.resolve()))
+        except ValueError:
+            key = str(Path(path).resolve())
+        data[key] = datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime("%Y-%m-%d %H-%M-%S")
+        try:
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            import json
+
+            with open(state_file, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            logging.warning(f"写处理状态失败（不影响本次处理）: {exc}")
+
+    def _get_pending_files(self, limit: int = 0) -> List[Path]:
+        """Download 目录里所有还没处理过的作品视频，按作品时间从旧到新。"""
+        processed = self._load_processed()
+        repo_root = Path(__file__).parent.resolve()
+        download_dirs = getattr(self.config, "DOWNLOAD_DIRS", [self.config.DOWNLOAD_DIR])
+        pending = []
+        for download_dir in download_dirs:
+            for folder_path in self._iter_work_dirs(download_dir):
+                folder_time = self._parse_folder_time(folder_path.name)
+                for file in sorted(folder_path.glob("*.mp4")):
+                    try:
+                        key = str(file.resolve().relative_to(repo_root))
+                    except ValueError:
+                        key = str(file.resolve())
+                    if key in processed:
+                        continue
+                    pending.append((folder_time or datetime.min, file))
+        pending.sort(key=lambda item: (item[0], str(item[1])))
+        files = [file for _, file in pending]
+        if limit and limit > 0:
+            files = files[:limit]
+        return files
 
     def _iter_work_dirs(self, download_dir: Path):
         """列出下载目录里的“单个作品文件夹”（名字是作品发布时间）。
@@ -562,6 +691,17 @@ class MainCommandHandler(HandlerBase):
         """
         results = []
         since, until = douyin_fetch.parse_time_range_string(time_range_str)
+        backfill_days = getattr(self.config, "BACKFILL_DAYS", 0)
+        if backfill_days > 0:
+            # 补抓模式：把时间窗放大到 N 天，只抓历史（每源限量），
+            # 之后由 FileManager 按未处理队列逐轮消费。
+            now = datetime.now(ZoneInfo(self.config.TIMEZONE))
+            since = now - timedelta(days=backfill_days)
+            until = now
+            logging.info(
+                f"补抓模式：抓取 {backfill_days} 天内的作品，"
+                f"每个源最多 {self.config.BACKFILL_MAX_PER_SOURCE} 条"
+            )
         for source in self.config.SOURCES:
             if source["platform"] == "douyin":
                 success = self._fetch_douyin_source(source, since, until)
@@ -592,6 +732,11 @@ class MainCommandHandler(HandlerBase):
                 config_path=self.config.CONFIG_FILE,
                 since=since,
                 until=until,
+                max_items=(
+                    self.config.BACKFILL_MAX_PER_SOURCE
+                    if getattr(self.config, "BACKFILL_DAYS", 0) > 0
+                    else None
+                ),
             )
         except Exception as exc:
             logging.error(f"抖音抓取失败: {exc}")

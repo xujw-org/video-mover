@@ -49,12 +49,14 @@ try:
     from .ffmpeg_utils import FFmpegHandler
     from .filters import VideoEffects
     from .subtitles import SubtitleHandler
+    from .workspace import temp_wav
 except ImportError:  # 作为顶层模块直接导入时（见 Dedup/dedup.py 垫片的回退路径）
     from audio import AudioHandler
     from config import VideoConfig
     from ffmpeg_utils import FFmpegHandler
     from filters import VideoEffects
     from subtitles import SubtitleHandler
+    from workspace import temp_wav
 
 
 class VideoHandler:
@@ -152,7 +154,7 @@ class VideoHandler:
                 self.subs = None
 
             # 处理音频
-            audio_path = tempfile.mktemp(suffix='.wav')
+            audio_path = temp_wav()
             temp_files.append(audio_path)
             if audio_stream:
                 audio_stream.output(audio_path, format='wav').run(overwrite_output=True)

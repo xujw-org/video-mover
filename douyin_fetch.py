@@ -165,6 +165,7 @@ def plan_downloads(
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     skip_existing: bool = True,
+    limit: Optional[int] = None,
 ) -> list[tuple[dict, list[str], Path]]:
     """把作品列表变成下载计划：[(aweme, 候选直链, 目标文件), ...]。
 
@@ -200,6 +201,8 @@ def plan_downloads(
         if skip_existing and target.exists() and target.stat().st_size > 0:
             continue
         plan.append((aweme, urls, target))
+        if limit is not None and len(plan) >= limit:
+            break
     return plan
 
 
@@ -303,17 +306,26 @@ def fetch_profile_awemes(
         }
         if proxy:
             launch_kwargs["proxy"] = {"server": proxy}
-        browser = pw.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
+        # 用仓库里的固定 profile 目录，而不是 Playwright 默认的
+        # %TEMP%\playwright_chromiumdev_profile-*：
+        # 1) 进程被强杀时那些临时 profile 会留在 C 盘（一个 15~50MB，越攒越多，
+        #    这次 C 盘紧张的排查里就有一堆）；2) 固定 profile 还能省掉每次重新
+        #    建上下文的时间。
+        profile_dir = Path(os.environ.get("VM_PLAYWRIGHT_PROFILE")
+                           or Path(__file__).resolve().parent / "tmp" / "chromium-profile")
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        context = pw.chromium.launch_persistent_context(
+            str(profile_dir),
             user_agent=user_agent,
             locale="zh-CN",
             viewport={"width": 1400, "height": 900},
             # 走 Burp 之类的拦截代理时，HTTPS 证书是代理自签的，必须放行才能
             # 看到明文（只在调试代理时才需要开）。
             ignore_https_errors=ignore_https_errors,
+            **launch_kwargs,
         )
         context.add_cookies(cookies)
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
 
         def on_response(response) -> None:
             if PROFILE_API_MARK not in response.url:
@@ -352,11 +364,20 @@ def fetch_profile_awemes(
             if last_count and len({id(a) for a in payloads}) and len(payloads) >= max_pages * 20:
                 break
 
-        browser.close()
+        context.close()
 
     nickname = nickname_from_title(title)
-    if not payloads:
-        nickname = nickname or _safe_name(Path(url).name)
+    if nickname == "unknown" or not nickname:
+        # 未登录/标题拿不到时退而求其次：用作品里的作者昵称，别把文件都丢进
+        # Download/.../unknown/ （昵称决定落盘目录）
+        for aweme in payloads:
+            author = (aweme.get("author") or {}).get("nickname")
+            if author:
+                nickname = _safe_name(author)
+                logging.info(f"页面标题不可用，改用作品作者的昵称: {nickname}")
+                break
+    if not nickname:
+        nickname = _safe_name(Path(url).name)
     return FetchResult(nickname=nickname, awemes=payloads, pages=len(payloads))
 
 
@@ -457,8 +478,13 @@ def fetch_and_download(
     dry_run: bool = False,
     max_scrolls: int = 25,
     ignore_https_errors: bool = False,
+    max_items: Optional[int] = None,
 ) -> int:
-    """供 main.py 调用：抓取 + 下载，返回下载（或命中）的视频数量。"""
+    """供 main.py 调用：抓取 + 下载，返回下载（或命中）的视频数量。
+
+    max_items 限制本次每个源最多下载多少条（补抓历史时用来分批，别一口气
+    把 30 天的作品全下下来占满磁盘）。
+    """
     setup = load_douyin_setup(config_path)
     if setup["proxy"]:
         # 配置了代理就要放行代理证书，否则 https 直接被拦在证书校验上
@@ -481,7 +507,7 @@ def fetch_and_download(
     )
     plan = plan_downloads(
         result.awemes, download_dir=Path(download_dir), nickname=result.nickname,
-        since=since, until=until,
+        since=since, until=until, limit=max_items,
     )
     logging.info("命中时间窗口的视频 %s 条（图文与已存在的不算）", len(plan))
     if not plan:

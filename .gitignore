@@ -73,3 +73,9 @@ douyin_users.db
 
 # A/B 试听样本
 samples/
+
+# Dedup 临时文件与补抓状态（都放仓库里，避免堆在 C 盘临时目录）
+tmp/
+state/
+.cache/
+samples/

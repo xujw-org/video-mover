@@ -363,12 +363,63 @@ headless 直接进上传页 → `python Upload/douyin_upload.py`：
 （网页 cookie 本身也死了）。也就是说 cookie 撑不住高频自动发布，需要人工
 重新导一次。建议：调度间隔不要太短，或在关键发布后主动检查登录态。
 
-### 11. 验证结果（2026-11-14，本机 dy）
+### 11. 补抓历史（队列模式）+ 临时文件别堆在 C 盘
+
+**队列模式**：之前每轮只看 `interval_minutes`（最多 24 小时）的时间窗，历史作品
+永远搬不到，而且程序停机期间的漏抓也补不回来。现在 `video_mover.backfill`：
+
+```yaml
+backfill:
+  days: 30            # 0 = 关闭；开启后抓取窗口放大到 30 天
+  max_per_source: 20  # 每个源单次最多下载
+  max_per_run: 3      # 每轮最多去重多少条
+```
+
+- 抓取：`execute_main_command` 把 `since` 拉到 `now - days`，并给
+  `douyin_fetch` 传 `max_items`（`plan_downloads(limit=...)` 截断），避免一口气
+  下 30 天把磁盘塞满；
+- 去重：`FileManager` 在补抓模式走**未处理队列** —— 扫 Download 里所有作品，
+  排除 `state/processed.json` 里已处理的，按作品时间从旧到新排队，每轮只取
+  `max_per_run` 条；处理成功才记录，失败下轮重试；
+- 关闭补抓（`days: 0`）时行为与以前完全一致（时间窗扫描），既有测试全部保留。
+
+**磁盘**：用户反馈跑完这个工作流后 C 盘爆满。实测结论（C: 94.3GB used / 5.7GB
+free，总量约 100GB）：
+
+| 项目 | 占用 | 归属 |
+| --- | --- | --- |
+| ms-playwright（chromium 450MB + headless_shell 286MB + firefox 353MB） | **1.09 GB** | 我们装的 |
+| `%TEMP%` 里我们的诊断素材 + Playwright 残留 profile | **~118 MB** | 我们产生的（已清） |
+| `C:\CrashDumps` 里一个游戏转储 | 219 MB | 与本项目无关（旧的） |
+| `C:\Windows` | 26.9 GB | 系统 |
+| `C:\Users\79365`（.android 10.4GB、AppData 22GB…） | 39.1 GB | 既有数据 |
+
+也就是说**这个工作流真正加的只有 ~1.2GB**（Playwright 浏览器 + 临时文件），
+C 盘本来就在 93% 左右的临界区，这次只是压垮它的最后一根稻草（另外 4K 处理时
+内存吃紧会让 `pagefile.sys` 涨到 2.3GB）。
+
+为此做的代码级清理：
+
+1. 新增 `Dedup/workspace.py`：中间音频（原声 wav、混音 float wav）改放
+   仓库的 `tmp/`（与项目同盘），每次启动 `clean_stale()` 清掉 24 小时前的残留
+   —— 以前进程被 `timeout`/Ctrl+C 杀掉时，`finally` 不执行，垃圾就永远留在
+   `C:\Users\...\Temp`；
+2. 抖音抓取改用**固定 Chromium profile**（`tmp/chromium-profile`，
+   可用 `VM_PLAYWRIGHT_PROFILE` 覆盖）而不是 Playwright 默认的
+   `%TEMP%\playwright_chromiumdev_profile-*`，被强杀也不会在 C 盘留 15~50MB 的
+   profile 目录；
+3. `state/`、`tmp/`、`samples/` 进 `.gitignore`。
+
+顺带修了一个可用性 bug：Cookie 失效时页面标题拿不到，昵称会算成
+`unknown`，作品全被下到 `Download/.../unknown/`；现在退回用作品里的
+`author.nickname`。
+
+### 12. 验证结果（2026-11-14，本机 dy）
 
 - `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
   firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
 - `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
-- `pytest -q`：**206 passed**（原 152 + 17 个 win_env 测试 + 5 个
+- `pytest -q`：**214 passed**（原 152 + 17 个 win_env 测试 + 5 个
   `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
 - `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
   均无解析器报错，中文显示正常。

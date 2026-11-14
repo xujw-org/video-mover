@@ -40,6 +40,15 @@ video_mover:
   schedule:
     interval_minutes: 300   # 调度间隔（分钟），必须是 1-1440 的整数，超出范围会报错
     timezone: "Asia/Singapore"  # 必须是合法的 IANA 时区名，例如 Asia/Shanghai
+  # 补抓历史 / 队列模式（可选）。days > 0 时：
+  #   * 抓取阶段把时间窗放大到 N 天（不再只看 interval_minutes），每个源限量；
+  #   * 去重阶段按“未处理队列”走，Download 里没处理过的作品都会排队，
+  #     处理成功的记进 state/processed.json，不会重复处理；
+  #   * 每轮只吃 max_per_run 条，避免一轮跑几个小时。想停就改回 days: 0。
+  backfill:
+    days: 0            # 0 = 关闭（只处理最近 interval_minutes 的新作品）；建议先试 7~30
+    max_per_source: 20 # 单次每个源最多下载多少条
+    max_per_run: 3     # 每轮最多去重多少条
   runtime:
     max_workers: null       # null = CPU 核心数；也可填正整数
     config_file: "my_apps.yaml"  # 传给 f2 命令的 -c 参数，相对仓库根目录

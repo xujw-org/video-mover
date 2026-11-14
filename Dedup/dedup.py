@@ -75,6 +75,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 def main(argv=None) -> None:
     """原命令行入口：python dedup.py -i input.mp4 -o output.mp4"""
+    # 先把上次被强杀留下的临时文件清掉（都在仓库 tmp/ 里，不占 C 盘）
+    try:
+        from .workspace import clean_stale
+    except ImportError:
+        from workspace import clean_stale
+    clean_stale()
     parser = argparse.ArgumentParser(description="python dedup.py -i input.mp4 -o output.mp4")
     parser.add_argument("-i", "--input", required=True, help="输入视频文件路径")
     parser.add_argument("-o", "--output", required=True, help="输出视频文件路径")

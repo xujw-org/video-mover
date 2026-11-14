@@ -26,6 +26,11 @@ except ImportError:  # 未安装 pydub 时为 None，调用方法时再报错
 if TYPE_CHECKING:
     from .config import VideoConfig
 
+try:  # 既支持作为包导入，也支持 Dedup/dedup.py 的回退路径（顶层模块）
+    from .workspace import temp_wav
+except ImportError:
+    from workspace import temp_wav
+
 
 def _ffmpeg_exe() -> str:
     """取 ffmpeg 可执行文件（与本项目其它地方一致：靠 PATH）。"""
@@ -73,7 +78,7 @@ class AudioHandler:
                 logging.info(
                     f"静音处理把音频剪短了 {shorten}ms，已用静音补回，保持音画同步"
                 )
-            output_path = tempfile.mktemp(suffix='.wav')
+            output_path = temp_wav()
             processed_audio.export(output_path, format='wav')
             logging.info(f"静音处理完成，输出到 {output_path}")
             return output_path
@@ -107,7 +112,7 @@ class AudioHandler:
                 gain_db = 20 * math.log10(background_music_volume)
             else:
                 gain_db = -60.0  # 0 时分贝对数无定义，用 -60dB 当静音
-            mixed_path = tempfile.mktemp(suffix='.wav')
+            mixed_path = temp_wav()
             filter_graph = (
                 f"[1:a]volume={gain_db:.2f}dB[bgm];"
                 "[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]"

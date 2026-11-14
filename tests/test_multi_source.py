@@ -450,6 +450,7 @@ def test_execute_main_command_routes_douyin_to_browser_fetcher(tmp_path, monkeyp
             "config_path": cfg.CONFIG_FILE,
             "since": datetime(2026, 11, 12, 10, 0, 0),
             "until": datetime(2026, 11, 12, 11, 0, 0),
+            "max_items": None,  # 未开补抓时不限量
         },
     )]
     # 抖音源不产生 f2 子进程，只有 tiktok 源会
@@ -548,3 +549,126 @@ def test_resolve_download_dirs_includes_parent_for_nickname_layout(tmp_path, mon
     dirs = mod._resolve_download_dirs(section, tmp_path)
     # 配置推导出的是 <mode>/a（不存在），实际搜到的是它的上一层 <mode>
     assert dirs == [mode_dir]
+
+
+# ------------------------------------------------------------------ 补抓历史 / 队列模式
+
+def _backfill_config(tmp_path, **backfill):
+    sources = [{"platform": "douyin", "account": "@a",
+                "url": "https://www.douyin.com/@a",
+                "download_dir": str(tmp_path / "dl")}]
+    path = _write_sources_yaml(tmp_path, sources)
+    import yaml as _yaml
+
+    data = _yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["video_mover"]["backfill"] = backfill
+    path.write_text(_yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    cfg = AppConfig(config_path=str(path))
+    cfg.STATE_FILE = tmp_path / "state" / "processed.json"
+    return cfg
+
+
+def test_backfill_config_defaults_and_overrides(tmp_path):
+    cfg = _backfill_config(tmp_path, days=30, max_per_source=5, max_per_run=2)
+    assert cfg.BACKFILL_DAYS == 30
+    assert cfg.BACKFILL_MAX_PER_SOURCE == 5
+    assert cfg.BACKFILL_MAX_PER_RUN == 2
+
+    # 不写 backfill 时默认关闭补抓
+    plain = AppConfig(config_path=str(_write_sources_yaml(
+        tmp_path, [{"platform": "douyin", "account": "@a",
+                    "url": "https://www.douyin.com/@a",
+                    "download_dir": str(tmp_path / "dl2")}])))
+    assert plain.BACKFILL_DAYS == 0
+
+
+def test_backfill_rejects_out_of_range_days(tmp_path):
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        _backfill_config(tmp_path, days=999)
+    with _pytest.raises(ValueError):
+        _backfill_config(tmp_path, days="junk")
+
+
+def test_pending_files_skips_processed_and_respects_limit(tmp_path):
+    cfg = _backfill_config(tmp_path, days=30, max_per_run=2)
+    dl = cfg.DOWNLOAD_DIRS[0]
+    made = []
+    for day, hour in ((10, 10), (11, 11), (12, 12)):
+        folder = dl / f"2026-11-{day} {hour}-00-00"
+        folder.mkdir(parents=True, exist_ok=True)
+        video = folder / f"2026-11-{day} {hour}-00-00_video.mp4"
+        video.write_bytes(b"x")
+        made.append(video)
+
+    manager = main_module.FileManager(cfg)
+    try:
+        pending = manager._get_pending_files(limit=10)
+        # 先空队列里的全部文件，按作品时间从旧到新
+        assert pending == made
+
+        # 记一条已处理，队列里就不该再出现
+        manager._record_processed(made[0])
+        assert manager._get_pending_files(limit=10) == made[1:]
+
+        # 每轮上限：只剩两条待办，limit=1 只取最旧的那条
+        assert manager._get_pending_files(limit=1) == made[1:2]
+    finally:
+        manager.observer.stop()
+
+
+def test_dedup_videos_in_backfill_mode_consumes_queue_and_records_state(tmp_path, monkeypatch):
+    cfg = _backfill_config(tmp_path, days=30, max_per_run=1)
+    dl = cfg.DOWNLOAD_DIRS[0]
+    old_folder = dl / "2026-11-10 10-00-00"     # 远早于当前时间窗
+    old_folder.mkdir(parents=True)
+    old_video = old_folder / "2026-11-10 10-00-00_video.mp4"
+    old_video.write_bytes(b"x")
+
+    manager = main_module.FileManager(cfg)
+    processed = []
+    monkeypatch.setattr(manager, "_process_video",
+                        lambda f: (processed.append(f), True)[1])
+    try:
+        count = manager.dedup_videos("2026-11-14 00-00-00|2026-11-14 05-00-00")
+        assert count == 1
+        assert processed == [old_video]          # 时间窗外的历史作品也被处理了
+        # 处理成功要记进 state，第二轮不会重复处理
+        assert old_video.name in "".join(manager._load_processed())
+        assert manager.dedup_videos("2026-11-14 00-00-00|2026-11-14 05-00-00") == 0
+    finally:
+        manager.observer.stop()
+
+
+def test_dedup_videos_without_backfill_still_uses_time_window(tmp_path, monkeypatch):
+    cfg = _backfill_config(tmp_path, days=0)
+    dl = cfg.DOWNLOAD_DIRS[0]
+    (dl / "2026-11-10 10-00-00").mkdir(parents=True)
+    (dl / "2026-11-10 10-00-00" / "2026-11-10 10-00-00_video.mp4").write_bytes(b"x")
+
+    manager = main_module.FileManager(cfg)
+    monkeypatch.setattr(manager, "_process_video", lambda f: True)
+    try:
+        # 时间窗内没有作品 -> 0（窗口外的历史作品不会被碰）
+        assert manager.dedup_videos("2026-11-14 00-00-00|2026-11-14 05-00-00") == 0
+    finally:
+        manager.observer.stop()
+
+
+def test_execute_main_command_backfill_widens_window(tmp_path, monkeypatch):
+    from datetime import datetime as _dt, timedelta as _td
+
+    cfg = _backfill_config(tmp_path, days=30, max_per_source=7)
+    handler = main_module.MainCommandHandler(cfg)
+    calls = []
+    monkeypatch.setattr(main_module.douyin_fetch, "fetch_and_download",
+                        lambda url, **kw: (calls.append((url, kw)), 0)[1])
+    monkeypatch.setattr(handler, "_run_command", lambda command: (True, False))
+
+    handler.execute_main_command("2026-11-14 00-00-00|2026-11-14 05-00-00")
+    assert len(calls) == 1
+    _, kwargs = calls[0]
+    span = kwargs["until"] - kwargs["since"]
+    assert abs(span - _td(days=30)) < _td(minutes=1)   # 窗口被放大到 30 天
+    assert kwargs["max_items"] == 7

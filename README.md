@@ -240,6 +240,33 @@ python main.py
 
 程序会自动打开浏览器并执行任务，按提示完成首次登录即可进入自动化流程。
 
+### 补抓历史作品（队列模式）
+
+默认每个调度周期只处理 `interval_minutes`（最长 24 小时）内的新作品。想分批把
+博主的历史作品搬过来，在 `my_apps.yaml` 里打开 backfill：
+
+```yaml
+video_mover:
+  backfill:
+    days: 30           # 抓最近 30 天的作品；0 = 关闭
+    max_per_source: 20 # 每个源单次最多下载多少条
+    max_per_run: 3     # 每轮最多去重多少条（4K 一条约 1.5 分钟）
+```
+
+开启后：抓取阶段把时间窗放大到 `days` 天并把作品下载到 `Download/`；去重阶段
+改看**未处理队列**（`state/processed.json` 记录已处理的文件），每轮只吃
+`max_per_run` 条，跑完自动发布。想停就改回 `days: 0`。
+
+> 4K 素材一条去重约 1.5 分钟、成品 20~30MB，补抓 30 天前建议先看磁盘余量。
+
+### 临时文件位置
+
+Dedup 的中间音频放在仓库的 `tmp/`（与项目同盘，默认 D 盘），不再落到
+`C:\Users\<用户>\AppData\Local\Temp`；每次启动会清掉 24 小时前的残留。
+抖音抓取用的 Chromium profile 也固定在 `tmp/chromium-profile`（可用环境变量
+`VM_PLAYWRIGHT_PROFILE` 改），不会在 C 盘临时目录留一堆
+`playwright_chromiumdev_profile-*`。
+
 ### 抖音抓取通道（2026-11-14 起）
 
 抖音**不再走 f2**：抖音现在对 `/aweme/v1/web/aweme/post/` 强制 Argus secsdk
