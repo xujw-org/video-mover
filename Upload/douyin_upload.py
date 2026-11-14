@@ -58,6 +58,8 @@ _TAG_RE = re.compile(r"#([^\s#]+)")
 # 发布节奏：两次发布至少间隔这么多分钟（默认 15）。抖音对“短时间连续发布”
 # 很不友好，连着发几条很容易被判异常。状态存在文件里，跨进程/跨轮次都生效。
 DEFAULT_MIN_INTERVAL_MINUTES = 15
+# 每个内容话题额外补几个官方“热门标签”（联想结果里带播放量的那种）
+DEFAULT_HOT_TAGS = 2
 PUBLISH_STATE_FILE = "Upload/.last_publish"
 TIME_FMT_LOCAL = "%Y-%m-%d %H:%M:%S"
 
@@ -274,13 +276,28 @@ def collect_videos(video_dir=VIDEO_DIR):
     return sorted(video_dir.glob("*.mp4"))
 
 
-async def upload_one(video_path, title, tags, account_file):
+async def upload_one(video_path, title, tags, account_file, cover_dir=None, hot_tags=DEFAULT_HOT_TAGS):
     """上传单个视频；DouYinVideo 内部已处理上传失败重试，抛异常才算失败。"""
     # 延迟导入：本脚本的纯函数（标题解析等）被测试导入时不需要 playwright。
     from uploader.douyin_uploader.main import DouYinVideo
 
+    # 抖音发布页要横/竖两张封面，不设会提示“横/竖双封面缺失”、曝光也差。
+    # 这里从视频里截一帧生成两张，失败就不设封面（不阻塞发布）。
+    cover_path, horizontal_cover = None, None
+    try:
+        from cover import make_covers
+
+        cover_dir = Path(cover_dir) if cover_dir else Path(video_path).parent / ".covers"
+        covers = make_covers(video_path, cover_dir)
+        cover_path = str(covers["vertical"])
+        horizontal_cover = str(covers["horizontal"])
+    except Exception as e:
+        print(f"生成封面失败（继续不设封面）: {e}")
+
     app = DouYinVideo(
-        title=title, file_path=video_path, tags=tags, publish_date=0, account_file=account_file
+        title=title, file_path=video_path, tags=tags, publish_date=0, account_file=account_file,
+        thumbnail_path=cover_path, horizontal_cover_path=horizontal_cover,
+        hot_tags=hot_tags,
     )
     await app.main()
 
@@ -335,7 +352,8 @@ async def run(video_dir=VIDEO_DIR, config_path=None, repo_root=None):
         title, tags = resolve_title_tags(video_path, download_dirs)
         print(f"上传: {video_path.name} 标题: {title} 话题: {tags}")
         try:
-            await upload_one(video_path, title, tags, account_file)
+            await upload_one(video_path, title, tags, account_file,
+                             hot_tags=int(upload_cfg.get("hot_tags", DEFAULT_HOT_TAGS) or 0))
         except Exception as e:
             print(f"上传失败 {video_path.name}: {e}")
             failed.append(video_path)

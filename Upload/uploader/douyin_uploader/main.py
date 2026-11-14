@@ -4,6 +4,7 @@ from datetime import datetime
 from playwright.async_api import Playwright, async_playwright, Page
 import os
 import asyncio
+import re
 import time
 
 from conf import LOCAL_CHROME_PATH
@@ -186,7 +187,8 @@ async def douyin_cookie_gen(account_file):
 
 
 class DouYinVideo(object):
-    def __init__(self, title, file_path, tags, publish_date: datetime, account_file, thumbnail_path=None):
+    def __init__(self, title, file_path, tags, publish_date: datetime, account_file,
+                 thumbnail_path=None, horizontal_cover_path=None, hot_tags: int = 0):
         self.title = title  # 视频标题
         self.file_path = file_path
         self.tags = tags
@@ -195,6 +197,8 @@ class DouYinVideo(object):
         self.date_format = '%Y年%m月%d日 %H:%M'
         self.local_executable_path = LOCAL_CHROME_PATH
         self.thumbnail_path = thumbnail_path
+        self.horizontal_cover_path = horizontal_cover_path
+        self.hot_tags = max(0, int(hot_tags or 0))
 
     async def set_schedule_time_douyin(self, page, publish_date):
         # 选择包含特定文本内容的 label 元素
@@ -414,11 +418,8 @@ class DouYinVideo(object):
             await page.keyboard.press("Delete")
             await page.keyboard.type(self.title)
             await page.keyboard.press("Enter")
-        css_selector = ".zone-container"
-        for index, tag in enumerate(self.tags, start=1):
-            await page.type(css_selector, "#" + tag)
-            await page.press(css_selector, "Space")
-        douyin_logger.info(f'总共添加{len(self.tags)}个话题')
+        added_topics = await self._fill_topics(page, self.tags, self.hot_tags)
+        douyin_logger.info(f'总共添加{len(added_topics)}个话题: {added_topics}')
 
         while True:
             # 判断重新上传按钮是否存在，如果不存在，代表视频正在上传，则等待
@@ -440,7 +441,7 @@ class DouYinVideo(object):
                 await asyncio.sleep(2)
         
         #上传视频封面
-        await self.set_thumbnail(page, self.thumbnail_path)
+        await self.set_thumbnail(page, self.thumbnail_path, self.horizontal_cover_path)
 
         # 更换可见元素
         await self.set_location(page, "杭州市")
@@ -474,20 +475,292 @@ class DouYinVideo(object):
         await context.close()
         await browser.close()
     
-    async def set_thumbnail(self, page: Page, thumbnail_path: str):
+    async def _click_suggestion(self, page, tag: str, skip: int = 0) -> str:
+        """在“#话题”联想下拉里选官方话题（带播放量的那种），返回选中的文本。
+
+        ``skip=0`` 优先选和 ``tag`` 同名的官方话题；``skip>0`` 用于“热门标签”，
+        按播放量从高到低补几个相关话题。选不到返回空串。
+        """
+        try:
+            picked = await page.evaluate(
+                """([tag, skip]) => {
+                  // 页面上可能有多个联想容器，挑“带播放量的行”最多的那个
+                  const drops = [...document.querySelectorAll('[class*="suggest"]')]
+                                 .filter(d => d.offsetParent);
+                  let best = null, bestRows = [];
+                  for (const drop of drops) {
+                    const rows = [...drop.querySelectorAll('div,li,span')].filter(e => {
+                      const parts = (e.innerText || '').split(String.fromCharCode(10))
+                                      .map(x => x.trim()).filter(Boolean);
+                      return parts.length === 2 && parts[0].startsWith('#')
+                             && /[0-9.]+[亿万]$/.test(parts[1]);
+                    });
+                    if (rows.length > bestRows.length) { best = drop; bestRows = rows; }
+                  }
+                  if (!bestRows.length) return '';
+                  let pick = bestRows.find(e => (e.innerText || '').trim().startsWith('#' + tag));
+                  if (!pick && skip > 0) pick = bestRows[skip] || bestRows[skip - 1];
+                  if (!pick && skip === 0) pick = bestRows[0];
+                  if (!pick) return '';
+                  pick.click();
+                  const parts = (pick.innerText || '').split(String.fromCharCode(10))
+                                  .map(x => x.trim()).filter(Boolean);
+                  return parts[0] || '#';
+                }""",
+                [tag, skip],
+            ) or ""
+            return re.sub(r"[0-9.]+[亿万]$", "", picked)
+        except Exception as e:
+            douyin_logger.debug(f"选官方话题失败: {e}")
+            return ""
+
+    async def _fill_topics(self, page, tags, hot_tags: int = 0) -> list:
+        """把话题填进描述框，并尽量挂上官方话题（联想结果），再补几个热门话题。"""
+        selector = ".zone-container"
+        added = []
+        for tag in tags:
+            await page.type(selector, "#" + tag)
+            await asyncio.sleep(2.0)
+            picked = await self._click_suggestion(page, tag)
+            if picked:
+                added.append(picked)
+                douyin_logger.info(f"  [-] 话题已挂官方话题：{picked}")
+            else:
+                await page.press(selector, "Space")
+                added.append("#" + tag)
+            await asyncio.sleep(0.4)
+
+        # 热门标签：同一个关键词下按播放量再补几个官方话题
+        for tag in tags:
+            for index in range(1, hot_tags + 1):
+                await page.type(selector, "#" + tag)
+                await asyncio.sleep(2.0)
+                picked = await self._click_suggestion(page, tag, skip=index)
+                if picked and picked not in added:
+                    added.append(picked)
+                    douyin_logger.info(f"  [-] 加了个热门话题：{picked}")
+                else:
+                    # 没选中就撤掉刚敲的 "#tag"
+                    for _ in range(len(tag) + 1):
+                        await page.keyboard.press("Backspace")
+                    break
+                await asyncio.sleep(0.4)
+        return added
+
+    async def _open_cover_modal(self, page):
+        """打开封面编辑弹窗（已经开着就复用），返回 modal locator。
+
+        设完一张封面后，页面上的“选择封面”可能变成悬浮才显示的可点区域，
+        Playwright 的可点性检查会超时，所以点不动就用 JS 直接触发一次。
+        """
+        modal = page.locator("div.dy-creator-content-modal-wrap").last
+        if await page.locator("div.dy-creator-content-modal-wrap").count():
+            return modal
+        try:
+            await page.get_by_text("选择封面").first.click(timeout=6000)
+        except Exception:
+            await page.evaluate(
+                """() => {
+                  const els = [...document.querySelectorAll('*')]
+                      .filter(e => !e.children.length && (e.innerText || '').trim() === '选择封面');
+                  if (els.length) els[0].click();
+                }"""
+            )
+        await modal.wait_for(state="visible", timeout=15000)
+        return modal
+
+    async def _upload_cover_in_modal(self, page, image_path: str) -> bool:
+        """在当前封面 tab 里塞图并点“完成”。
+
+        每次都要重新取一次 modal：切 tab 后 React 会重渲染，之前拿到的 locator
+        会失效（表现为“弹窗里没有图片上传框”）。
+        """
+        upload_input = None
+        modal = None
+        for _ in range(6):
+            modal = page.locator("div.dy-creator-content-modal-wrap").last
+            try:
+                candidates = modal.locator("input[accept*='image']")
+                if await candidates.count():
+                    upload_input = candidates.first
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+        if modal is None:
+            return False
+        if upload_input is None:
+            douyin_logger.warning("  [-] 弹窗里没有图片上传框")
+            return False
+        try:
+            await upload_input.wait_for(state="attached", timeout=10000)
+            await upload_input.set_input_files(str(image_path))
+        except Exception as e:
+            douyin_logger.warning(f"  [-] 封面文件塞不进上传框: {e}")
+            return False
+        done = modal.get_by_role("button", name="完成").first
+        for _ in range(20):
+            await asyncio.sleep(1.0)
+            try:
+                if await done.is_enabled():
+                    break
+            except Exception:
+                return False
+        try:
+            await done.click(timeout=8000)
+            await asyncio.sleep(2.0)
+            return True
+        except Exception as e:
+            douyin_logger.warning(f"  [-] 封面“完成”点不动: {e}")
+            return False
+
+    async def _switch_cover_tab(self, modal, tab_name: str, page=None) -> bool:
+        """在封面弹窗里切到另一个 tab（“设置横封面”/“设置竖封面”）。"""
+        for locator_factory in (
+            lambda: modal.get_by_role("button", name=tab_name),
+            lambda: modal.get_by_text(tab_name, exact=True),
+        ):
+            try:
+                locator = locator_factory()
+                if await locator.count():
+                    await locator.first.click(timeout=4000)
+                    await asyncio.sleep(1.8)
+                    return True
+            except Exception:
+                continue
+        # 最后兜底：JS 直接点（Playwright 的可点性检查会被浮层挡住）
+        try:
+            done = await (page or modal.page).evaluate(
+                """(name) => {
+                  const modals = [...document.querySelectorAll('div.dy-creator-content-modal-wrap')]
+                                   .filter(e => e.offsetParent);
+                  if (!modals.length) return false;
+                  const m = modals[modals.length - 1];
+                  const btn = [...m.querySelectorAll('button,[role=button],div')]
+                      .find(e => (e.innerText || '').trim() === name);
+                  if (!btn) return false;
+                  btn.click();
+                  return true;
+                }""",
+                tab_name,
+            )
+            if done:
+                await asyncio.sleep(1.8)
+                return True
+        except Exception:
+            pass
+        try:
+            labels = [b.strip()[:12] for b in await modal.get_by_role("button").all_inner_texts()]
+            text = (await modal.inner_text()).replace(chr(10), " / ")[:160]
+            douyin_logger.info(f"  [-] 封面弹窗现状 按钮={labels} 文本={text}")
+        except Exception:
+            pass
+        return False
+
+    async def _cover_warning(self, page) -> str:
+        """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""
+        try:
+            body = await page.locator("body").inner_text()
+        except Exception:
+            return ""
+        lines = [l.strip() for l in body.splitlines() if "封面" in l]
+        for line in lines:
+            if "缺失" in line or "检测通过" in line or "低质" in line:
+                return line[:40]
+        return " ".join(lines)[:40]
+
+    async def _reopen_cover_modal(self, page, attempts: int = 3):
+        """打开（或复用）封面弹窗。
+
+        注意必须判断“真的可见”：弹窗关掉后 DOM 里可能还留着隐藏的
+        ``dy-creator-content-modal-wrap``，只看 count>0 会拿到一个隐藏元素，
+        后面的点击全部 30 秒超时。
+        """
+        modal = page.locator("div.dy-creator-content-modal-wrap").last
+        for _ in range(attempts):
+            try:
+                if await modal.count() and await modal.is_visible():
+                    return modal
+            except Exception:
+                pass
+            try:
+                await page.evaluate(
+                    """() => {
+                      const els = [...document.querySelectorAll('div,span')]
+                          .filter(e => !e.children.length
+                                  && (e.innerText || '').trim() === '选择封面' && e.offsetParent);
+                      if (els.length) els[0].click();
+                    }"""
+                )
+                await modal.wait_for(state="visible", timeout=8000)
+                return modal
+            except Exception:
+                await asyncio.sleep(1.5)
+        return None
+
+    async def set_thumbnail(self, page: Page, thumbnail_path: str = "", horizontal_cover: str = ""):
+        """设置竖/横封面（抖音会提示“横/竖双封面缺失”，两个都设曝光更好）。
+
+        实测要点：
+        * 点“选择封面”打开 ``div.dy-creator-content-modal-wrap``，默认“设置竖封面”tab；
+        * 图片塞进 ``input.semi-upload-hidden-input`` 后，“完成”一开始是 disabled
+          （编辑器还在处理），要轮询到可用再点；
+        * 点“完成”之后弹窗经常自己关掉，而页面上仍留着两个“选择封面”（竖/横各一个），
+          直接用 JS 点它重新打开，再切到“设置横封面”传第二张 —— 用 Playwright
+          的可点性检查在这里会一直超时（元素被遮挡/需要悬停）。
+        旧实现用的 ``semi-modal-content`` / ``extractFooter`` 选择器早已失效，
+        相当于从来没设上过封面。
+        """
+        if not thumbnail_path and not horizontal_cover:
+            return
+        modal = await self._reopen_cover_modal(page)
+        if modal is None:
+            douyin_logger.warning("  [-] 打不开封面弹窗，跳过设置封面")
+            return
+
+        # 先设横封面：刚打开的弹窗里切 tab 才有效；点过“完成”之后切 tab 会被忽略
+        # （实测按钮点了没反应），所以顺序是 横 → 竖，不能反过来。
+        if horizontal_cover:
+            text_now = ""
+            try:
+                text_now = await modal.inner_text()
+            except Exception:
+                pass
+            switched = ("横封面预览" in text_now) or await self._switch_cover_tab(modal, "设置横封面")
+            if switched and await self._upload_cover_in_modal(page, horizontal_cover):
+                douyin_logger.info("  [-] 横封面已设置")
+            else:
+                douyin_logger.warning("  [-] 横封面没设成功")
+
         if thumbnail_path:
-            await page.click('text="选择封面"')
-            await page.wait_for_selector("div.semi-modal-content:visible")
-            await page.click('text="设置竖封面"')
-            await page.wait_for_timeout(2000)  # 等待2秒
-            # 定位到上传区域并点击
-            await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
-            await page.wait_for_timeout(2000)  # 等待2秒
-            await page.locator("div[class^='extractFooter'] button:visible:has-text('完成')").click()
-            # finish_confirm_element = page.locator("div[class^='confirmBtn'] >> div:has-text('完成')")
-            # if await finish_confirm_element.count():
-            #     await finish_confirm_element.click()
-            # await page.locator("div[class^='footer'] button:has-text('完成')").click()
+            modal = await self._reopen_cover_modal(page)
+            if modal is None:
+                douyin_logger.warning("  [-] 重新打开封面弹窗失败，竖封面没设")
+            elif await self._upload_cover_in_modal(page, thumbnail_path):
+                douyin_logger.info("  [-] 竖封面已设置")
+
+        try:
+            for _ in range(3):
+                visible_modal = page.locator("div.dy-creator-content-modal-wrap").last
+                if not (await visible_modal.count() and await visible_modal.is_visible()):
+                    break
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(1.2)
+            douyin_logger.success(f"  [-] 封面已应用（页面提示: {await self._cover_warning(page) or '无'}）")
+        except Exception:
+            pass
+
+    async def _cover_warning(self, page) -> str:
+        """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""
+        try:
+            body = await page.locator("body").inner_text()
+        except Exception:
+            return ""
+        lines = [l.strip() for l in body.splitlines() if "封面" in l]
+        for line in lines:
+            if "缺失" in line or "检测通过" in line or "低质" in line:
+                return line[:40]
+        return " ".join(lines)[:40]
 
     async def set_location(self, page: Page, location: str = "杭州市"):
         # todo supoort location later
