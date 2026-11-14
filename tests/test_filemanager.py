@@ -91,3 +91,30 @@ def test_process_video_nonzero_exit_returns_false(file_manager, tmp_path, monkey
     input_file = tmp_path / "clip.mp4"
     input_file.write_bytes(b"fake")
     assert manager._process_video(input_file) is False
+
+
+def test_get_video_files_supports_f2_nested_layout(file_manager, tmp_path):
+    """f2 落盘是 <download_dir>/<昵称>/<作品时间>/*.mp4，也要能扫到。"""
+    manager, cfg = file_manager
+    download_dir = cfg.DOWNLOAD_DIR
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    # 结构一：download_dir 直接是 <作品时间>
+    flat = download_dir / "2025-03-07 21-00-00"
+    flat.mkdir()
+    (flat / "flat.mp4").write_bytes(b"x")
+
+    # 结构二：download_dir 是 <昵称>，作品时间在下一层
+    nested = download_dir / "nickname" / "2025-03-07 21-30-00"
+    nested.mkdir(parents=True)
+    (nested / "nested.mp4").write_bytes(b"x")
+
+    # 不在时间范围内的作品不取
+    other = download_dir / "nickname" / "2025-03-07 23-00-00"
+    other.mkdir(parents=True)
+    (other / "late.mp4").write_bytes(b"x")
+
+    start = datetime(2025, 3, 7, 20, 45, 0)
+    end = datetime(2025, 3, 7, 21, 45, 0)
+    found = {p.name for p in manager._get_video_files(start, end)}
+    assert found == {"flat.mp4", "nested.mp4"}

@@ -62,7 +62,9 @@ def test_load_full_config(tmp_path):
     assert cfg.SOURCE_PLATFORM == "tiktok"
     assert cfg.SOURCE_ACCOUNT == "@tester"
     assert cfg.SOURCE_URL == "https://www.tiktok.com/@tester"
-    assert cfg.F2_COMMAND == ["f2", "tk"]
+    # f2 0.0.1.7 的 douyin/tiktok CLI 不带 -M 会直接报错退出，
+    # 所以缺省时自动补 "-M post"（见 main._ensure_mode）。
+    assert cfg.F2_COMMAND == ["f2", "tk", "-M", "post"]
     assert cfg.SCHEDULE_INTERVAL == 60
     assert cfg.TIMEZONE == "Asia/Shanghai"
     assert cfg.MAX_WORKERS == 2

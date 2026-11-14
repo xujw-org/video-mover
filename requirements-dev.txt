@@ -11,8 +11,14 @@
 # tzdata：AppConfig 用 ZoneInfo 校验时区，Windows 上没有它会抛
 # ZoneInfoNotFoundError；测试里大量用 Asia/Shanghai / Europe/London，
 # 所以测试依赖里也要装，版本与 requirements.txt 一致。
-pytest==9.2.0
-pyyaml==6.0.3
+#
+# pytest / pyyaml 为什么要降版（2026-11-13）：f2==0.0.1.7 的元数据把
+# pytest 钉死 8.3.4、pyyaml 钉死 6.0.2，而 f2 在 requirements.txt 里是运行
+# 必需项。若这里仍写 pytest==9.2.0 / pyyaml==6.0.3，
+# pip install -r requirements.txt -r requirements-dev.txt 会直接
+# ResolutionImpossible。两边都跟 f2 对齐后，单独装（CI）和一起装都能解析。
+pytest==8.3.4
+pyyaml==6.0.2
 numpy==2.5.4
 Pillow==13.0.0
 pywin32==312; sys_platform == "win32"

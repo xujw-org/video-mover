@@ -53,6 +53,9 @@ Download/
 Upload/videos/
 app.log
 *.log
+# f2 运行时会在当前目录建 sqlite 用户库（抖音已改走浏览器通道，不再需要）
+douyin_users.db
+*.db
 
 # 大二进制资产（字体 / 音乐 / 视频 / 图片 / 可执行文件）不进仓库，
 # 本地通过 python scripts/download_assets.py 获取，详见 ASSETS.md。
@@ -64,3 +67,6 @@ app.log
 *.ttf
 *.otf
 *.exe
+
+# 本地编辑器配置
+.vscode/
