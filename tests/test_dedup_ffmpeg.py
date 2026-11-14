@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 
+import numpy as np
 import pytest
 
 from Dedup.ffmpeg_utils import FFmpegHandler
@@ -82,3 +83,51 @@ def test_get_video_properties_probe_error_raises():
     ffmpeg.probe_error = ffmpeg.Error("probe failed")
     with pytest.raises(ffmpeg.Error):
         FFmpegHandler.get_video_properties("in.mp4")
+
+
+def test_write_frames_encodes_yuv420p_and_shortest(monkeypatch, tmp_path):
+    """编码必须显式 yuv420p，并且加 -shortest。
+
+    历史上两个坑都在这里：
+    - 不写 pix_fmt 时 x264 选 yuv444p（High 4:4:4），手机/抖音解不了，
+      表现成“前几秒正常后面一帧卡住”；
+    - 不加 -shortest 时容器时长跟音频走，视频流短，播放器把最后一帧定住。
+    """
+    from Dedup.pipeline import VideoHandler
+
+    captured = {}
+
+    class _FakeInput:
+        def __init__(self, *a, **k):
+            pass
+
+        def output(self, *args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return self
+
+        def overwrite_output(self):
+            return self
+
+        def run_async(self, **kwargs):
+            return _FakeProcess()
+
+    class _FakeProcess:
+        stdin = type("S", (), {"write": lambda self, b: None, "close": lambda self: None})()
+
+        def wait(self):
+            return 0
+
+    class _FakeFfmpeg:
+        @staticmethod
+        def input(*a, **k):
+            return _FakeInput(*a, **k)
+
+    monkeypatch.setattr("Dedup.pipeline.ffmpeg", _FakeFfmpeg)
+
+    handler = VideoHandler.__new__(VideoHandler)  # 跳过 __init__ 的配置校验
+    frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(3)]
+    handler._write_frames(iter(frames), str(tmp_path / "out.mp4"), 4, 4, 30.0, None)
+
+    assert captured["kwargs"]["pix_fmt"] == "yuv420p"
+    assert "shortest" in captured["kwargs"]

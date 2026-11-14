@@ -5,6 +5,302 @@
 **xujw-org/video-mover**。本次只做了下面三组优先改进，没有重构业务逻辑，
 没有改动视频处理与上传流程本身。
 
+## Windows 批处理中文乱码 + conda 环境一键配置（2026-11-14，未推送）
+
+目标机器：Windows 11（22631）+ Anaconda，使用已有的 conda 环境 `dy`
+（Python 3.13.18）。本批只修脚本与依赖清单，不动业务逻辑。
+
+### 1. `.bat` 中文乱码：根因与修复
+
+根因有两层，第二层是本批真正花时间去查的：
+
+1. **编码层**：cmd.exe 默认按系统代码页解释批处理文件的字节。简体中文
+   Windows 是 cp936，UTF-8 编码的中文（`rem` 注释 / `echo` 文本）直接变成
+   乱码，因为原来两个 `.bat` 既没有 `chcp 65001`，也没有声明编码。
+2. **解析器层（实测确认）**：加上 `chcp 65001` 后显示修好了，但 cmd.exe
+   的批处理解析器在 65001 代码页下用“字符数”当“字节数”回溯文件位置，
+   遇到多字节中文会把某一行截断，把半行残片当命令执行。本机复现到的现象
+   是偶发地多出两条报错：
+   `'ocal，否则' 不是内部或外部命令`、`'已执行' 不是内部或外部命令`，
+   位置正好落在文件第 512 字节边界附近。对照实验：控制台**起始**代码页
+   65001 时 1/6 概率触发；起始为 936（双击运行时的默认值）时 6/6 干净。
+   也就是说，把“切换代码页”写在文件里本身就带着概率性故障。
+
+修复思路：**`.bat` 只保留纯 ASCII**（没有多字节，就不会乱码，也不会踩解析器
+偏移错位），中文提示一律交给 Python 脚本输出。新增 `scripts/win_env.py`：
+
+- `setup.bat [环境名]`（默认 `dy`）→ `python scripts\win_env.py setup --env …`：
+  升级 pip → 装 `requirements.txt` → 装 `requirements-dev.txt` → 装 Playwright
+  浏览器（chromium / firefox）→ 打上游补丁 → 检查 `ffmpeg` / `ffprobe`。
+  加 `--with-assets` 会顺手跑 `download_assets.py`。
+- `start.bat [环境名] [额外参数]` → `python scripts\win_env.py run --env …`：
+  检查依赖 → 清空 `Upload\videos\*.mp4`（沿用原脚本行为）→ 启动 `main.py`
+  并透传退出码；`--dry-run` 只检查环境不启动。
+- `python scripts/win_env.py check`：只读体检报告（解释器、依赖导入、ffmpeg、
+  Playwright 浏览器目录、补丁状态、资产状态）。
+
+两个 `.bat` 现在只做三件事：`cd /d` 到仓库根目录、`chcp 65001`（让 Python
+的 UTF-8 输出正常显示）、按 conda 环境名定位 `python.exe`，然后转交
+`win_env.py`。刻意不再 `call` 另一个 `.bat`（`call` 会放大解析器出错的
+影响面）。定位失败时的提示仍用英文 + ASCII，因为那时还没有 Python 可用。
+
+### 2. `requirements` 的锁定组合原本装不上
+
+在 dy 里实测 `pip install -r requirements.txt` 直接 `ResolutionImpossible`，
+两个独立问题：
+
+- **f2==0.0.1.7 硬钉了三个包的精确版本**（元数据里就是 `==`）：`pyyaml==6.0.2`、
+  `qrcode==8.0`、`pytest==8.3.4`。本仓库原先锁的是 `pyyaml==6.0.3`、
+  `qrcode==8.2`，于是冲突；`requirements-dev.txt` 里的 `pytest==9.2.0` 也让
+  “同时装运行依赖 + 测试依赖”这条路走不通。
+  → 三个版本改为跟随 f2：`qrcode==8.0`、`pyyaml==6.0.2`（两个文件都改）、
+  `pytest==8.3.4`（dev），并在文件里写明原因。
+- **`biliup==1.3.5` 在 Windows 上没有 wheel**：PyPI 上 1.3.x 只有 sdist，
+  装它要 Rust + MSVC（本机实测 `maturin` 构建失败：`link.exe` 报错 / 缺
+  C++ build tools）。1.2.9 有现成的 `cp39-abi3-win_amd64` wheel，且
+  `Upload/uploader/bilibili_uploader/main.py` 用到的
+  `biliup.plugins.bili_webup.{BiliBili,Data}` 在 1.2.9 里都在。
+  → 锁到 `biliup==1.2.9` 并注明原因。
+
+### 3. 真跑起来时暴露的两个阻塞问题
+
+第一次 `start.bat` 跑通后 f2 一个文件也没下，日志里只有一行
+`ERROR DouYin CLI 缺乏必要参数：mode`。顺着这条线查出两个必改项：
+
+- **f2 命令缺 `-M/--mode`**：f2 0.0.1.7 的 `apps/douyin/cli.py` 和
+  `apps/tiktok/cli.py` 把 `--mode/-M` 的 `default` 注释掉了，而
+  `f2/conf/app.yaml` 的 douyin 小节里也没有 `mode`，于是不传就直接报错退出
+  （`mode_function_map[mode]` 根本走不到）。修复：`_F2_COMMAND_BY_PLATFORM`
+  改成带 `-M post`；新增 `_ensure_mode()`，用户自定义的 `f2_command` 里
+  缺 `-M/--mode` 时也补默认 `post` 并打一条日志（有 `-M` / `--mode` 就尊重
+  原值）。
+- **落盘结构与去重扫描对不上**：f2 的真实结构是
+  `<path>/<app>/<mode>/<昵称>/<作品时间>/<id>.mp4`
+  （`apps/douyin/utils.py::create_user_folder`），而 `_get_video_files`
+  原来只在 `<download_dir>/<作品时间>/` 一层里找；另外 douyin 小节默认
+  没有 `folderize`，不开它 f2 会把作品平铺在 `Download` 下，按“作品时间
+  文件夹”扫描永远为空。修复两处：
+  1. `my_apps.yaml.example` 的 douyin 小节补上 `folderize: yes`、
+     `mode: post`、`naming: '{create}'`（tiktok 小节本来就有；`{create}`
+     正好是 `2026-11-14 15-17-57` 这种能被 `_parse_folder_time` 解析的名字）；
+  2. `FileManager` 新增 `_iter_work_dirs()`：先找本层的时间戳目录，
+     再往下找一层，所以 `download_dir` 配到 `<昵称>` 或往上到 `<mode>` 层
+     都能扫到。
+
+修完再跑：f2 日志变成 `模式：post`，请求真的发出去了；因为
+`my_apps.yaml` 里还是模板占位账号（`https://www.douyin.com/@example`），
+f2 报 `未在响应的地址中找到sec_user_id，检查链接是否为用户主页类名`，
+两个源都失败，调度器按既有逻辑跳过后续去重 / 上传。也就是代码侧已无阻塞，
+剩下只差真实博主主页地址 + 抖音 cookie。
+
+### 4. f2 在抖音上彻底失效：Argus secsdk 签名（Burp 抓包定位）
+
+环境、cookie、流水线代码都没问题，真正卡住的是新版风控签名。定位过程全在
+Burp 里做（用户浏览器走 Burp 代理，同时把我们的抓取器也挂到代理上对照）：
+
+- Burp 里最新一条 `/aweme/v1/web/aweme/detail/` 请求的参数除了 `a_bogus`
+  之外，还带了 `x-secsdk-web-signature`、`uifid`、`webid`、`fp`/`verifyFp`、
+  `timestamp`、`update_version_code` 等。
+- 拿浏览器自己发的那条 **200** 的 `aweme/post` URL，逐项删参数重放：
+
+  | 重放内容 | 结果 |
+  | --- | --- |
+  | 浏览器原样 URL | 200，返回 `aweme_list` |
+  | 删 `x-secsdk-web-signature` | 403 `ArgusSecurityPlugin Signature Not Found` |
+  | 删 `fp`/`webid`/`uifid`/`timestamp` | 403 `ArgusSecurityPlugin Uifid Not Found` |
+
+  签名由页面里的 secsdk JS（`lf-security.bytegoofy.com` 的 runtime bundle）
+  计算，f2 0.0.1.7 没有任何 secsdk 逻辑，PyPI 上 f2 最新就是 0.0.1.7，
+  升级无路 → 只能在请求层绕开它。
+
+修复：新增 `douyin_fetch.py`（抖音走**浏览器通道**）：
+
+1. Chromium（Playwright）用 yaml 里的 cookie 打开博主主页；
+2. 直接读页面**自己发出**的 `aweme/post` 响应（签名由页面 JS 完成），
+   按需滚动翻页，直到掌到时间窗口下界 / 不再有新响应；
+3. 用 httpx 按直链下载视频，落盘结构与 f2 一致：
+   `<download_dir>/<昵称>/<作品时间>/<aweme_id>.mp4`，去重扫描不用改；
+4. 图文作品（`aweme_type=68` / `media_type=42`）跳过：它们的
+   `video.play_addr` 指向的是背景音乐 mp3，直接下会得到音频（已实测）。
+
+`main.py` 的 `execute_main_command` 按平台分流：`douyin` →
+`_fetch_douyin_source()`（浏览器通道），tiktok 等其它平台继续走 f2 子进程，
+所以 f2 和现有配置对其它平台仍然有效。
+
+验证结果（同样在 Burp 里可以看到）：
+
+- 抓取器的 3 条 `aweme/post`（Burp 历史 index 1541/1635/1649）全部 **200**，
+  响应 1.4MB / 1.07MB / 1.3MB，带完整 `x-secsdk-web-signature`；
+- 真实下载：`7707114477661894106.mp4` 3.4MB，HEVC 2160x3840；
+- 真实处理：`Dedup/dedup.py` 跑完这个 4K 视频（4m14s）→ h264 2160x3840 +
+  aac，24MB，流水线链路通了；
+- `pytest`：**190 passed**（新增 `tests/test_douyin_fetch.py` 14 个，
+  以及 `main.py` 平台分流、图文跳过、落盘结构等回归用例）。
+
+顺带修的两个环境问题：
+
+- **`tests/test_multi_source.py` 会删掉真实的 `Download/`**：
+  `test_sources_list_parsed_with_derived_values` 的 `finally` 里写着
+  `shutil.rmtree(REPO_ROOT / "Download")`（因为该用例故意用推导出的默认下载
+  目录），也就是说每跑一次测试就会把用户已经下载的素材一起删光（本机实测
+  删过两次）。已改为只删本用例自己创建的两个空目录，并只清理变空的父目录。
+- **Python 3.13 缺 `audioop`**：pydub 0.25.1 会退到 `import pyaudioop`，
+  结果是 `AudioSegment` 为 `None`，Dedup 混 BGM 时报
+  `'NoneType' object has no attribute 'from_file'`。已在 requirements 里补
+  `audioop-lts==0.2.2; python_version >= "3.13"`。
+- `f2` 在仓库根目录生成的 `douyin_users.db` 已加入 `.gitignore`。
+
+遗留：抖音抓取依赖浏览器（比 f2 慢），需要 `python -m playwright install
+chromium`；调度窗口仍是 `interval_minutes`（1-1440）滚动窗口，超过 24h 的
+旧作品不会被自动处理，需要手动补抓：
+`python douyin_fetch.py --url <主页> --days 30`，再对目标文件单独跑
+`Dedup/dedup.py`。
+
+### 5. 上传也能无窗口 + 不用扫码（2026-11-14）
+
+用户问“能不能不用浏览器直接下载上传”，逐项确认的结果：
+
+| 环节 | 是否需要浏览器 | 现状 |
+| --- | --- | --- |
+| 视频文件下载 | 不需要 | httpx 直链下载（本来就是） |
+| 主页作品列表 | 需要（只需一个无窗口 Chromium 当“签名器”） | headless 跑，不弹窗口 |
+| 抖音上传 | 需要（模拟创作者中心页面） | 已改成 **headless**，不弹窗口 |
+
+要做底去掉浏览器，得把抖音的 secsdk 签名（215KB 混淆 runtime，见
+`lf-security.bytegoofy.com`）逆出来；实测签名是页面 webpack 侧调用产出的
+产物，短期不可行，因此下载列表保留 headless 浏览器。
+
+上传部分的两处改动：
+
+1. **cookie 不用扫码**：`sessionid`/`sid_guard`/`ttwid` 这些 cookie 的作用域是
+   `.douyin.com`，`creator.douyin.com` 与 `www.douyin.com` 共用。新增
+   `Upload/export_cookie.py`，把 `my_apps.yaml` 的 `douyin.cookie` 转成上传器要的
+   Playwright `storage_state`（`Upload/cookies/douyin_<账号>.json`）。实测
+   headless 直接进了 `creator-micro/content/upload`（页面已登录，无登录弹窗）。
+2. **无窗口 + 可演练**：`DouYinVideo` 原来硬写 `headless=False`，现改为读
+   `upload.headless`（默认 **true**，无窗口）；新增 `upload.dry_run`（默认 false）：
+   把标题/话题/封面/地点都填好，停在“发布”按钮前，不真正发布也不删文件。
+   环境变量只能往“更安全”的方向覆盖：`DOUYIN_UPLOAD_HEADED=1` 强制有界面，
+   `DOUYIN_UPLOAD_DRY_RUN=1` 强制不发布（方便一次性演练）。
+
+实测（无窗口、不发布）：
+
+```text
+上传模式：无窗口(dry_run：不真正发布)
+[-] 正在打开页面...  -> [+] 成功进入version_2发布页面!
+[-] 正在上传视频中... -> [-] 视频上传完毕
+[-] dry_run：表单已就绪，停在“发布”按钮前，不真正发布
+[-] cookie 更新完毕！
+dry_run 完成：1 个视频走到发布前，未发布也未删除
+```
+
+新增测试：`tests/test_export_cookie.py`（4 个）、`test_multi_source.py` 里的上传
+开关用例（4 个）。注：抖音创作者中心目前时不时会弹一个“发布前内容检测”引导层，
+会挡住部分点击元素，演练时偶尔需要重跑一次（本次第一次就撞上了）。
+
+### 6. 第一次真正发布：被引导浮层和过期 cookie 挡住（已修）
+
+第一次真跑发布（`Upload/douyin_upload.py`，headless）时暴露两个问题：
+
+1. **引导气泡挡住“发布”按钮**：创作者中心会弹一个「视频预览功能」气泡，
+   带一个“我知道了”按钮，正好盖在底部操作区上。旧代码是
+   `while True: 点发布 -> wait_for_url(manage**) -> 失败就再点`，于是
+   在没挡住的状态下疯狂重试了 10 几分钟（截图确认点了几十次）。
+   已修：
+   - 新增 `_dismiss_guides()`，点之前先关掉“我知道了 / 知道了”这类浮层，
+     并补一个 Escape；
+   - 新增 `publish_video()`：最多试 3 次，成功只认跳转到
+     `creator-micro/content/manage`，**失败直接抛错**，不再是死循环。
+   - 事后核查：作品数仍是 3 条（最新 2025-08-15），**没有被误发布**。
+2. **cookie 失效检测太旧**：原判断只找页面是否含“手机号登录”，新版扫码/
+   手机号表单里这些字不在 innerText（placeholder 不算正文），于是“cookie 有效”
+   误报，直到 `set_input_files` 撞上 3 个手机号输入框才炸（strict mode
+   violation）。已修：用元素检测（`input[name="normal-input"]` /
+   `web-login-area-code-input` + “扫码登录”等文字），失效时直接打印
+   “把最新 cookie 更新到 my_apps.yaml → `python Upload/export_cookie.py`”的指引。
+3. 顺带：抖音 desc 里带 emoji，Windows 控制台 cp936 下 `print` 会抛
+   `UnicodeEncodeError` 把上传打断。`Upload/douyin_upload.py` 开头已把
+   stdout/stderr 重设为 UTF-8（errors=replace）。
+
+另外这一轮把下载→上传的“描述文件”链条补齐了：`douyin_fetch.py` 现在按 f2 约定
+落盘 `<昵称>/<作品时间>/<作品时间>_video.mp4` 并写 `<作品时间>_desc.txt`，
+`Upload/douyin_upload.py` 会拿它当标题 + 话题（实测标题
+“🐱🐶🌧️ 因为太可爱了，所以放大看看👀” + 话题 `今天是太阳雨`）。
+`_resolve_download_dirs` 也补了“配置目录不存在时退一层找”的逻辑，
+`find_desc_file` 支持多一层昵称目录。
+
+### 7. Dedup 处理 4K 视频：10 分钟 + 成品“后半段一帧卡死”（已修）
+
+用户反馈：一段 8 秒的抖音 4K 视频，去重跑了 10 分钟，而且成品只有前几秒正常，
+后面整段是同一帧。实测定位到三个独立问题：
+
+1. **成品被截断到 100 帧（= 一个批大小）**：帧交换用的是“对每个输出帧
+   `cap.set(CAP_PROP_POS_FRAMES)` 再读一帧”的 seek 写法。HEVC 4K 上逐帧定位
+   极慢（单是 250 次 seek 就要 170 秒），而且 seek 一旦失败就 `break`，
+   于是生成器在第 101 次 seek 失败后直接结束 —— 正好停在 batch_size=100 上，
+   输出只有 3.5 秒画面。改成**顺序读帧 + 每块内交换前两帧**（内存只多 1 帧，
+   语义与原来的 `get_original_idx` 一致），不再 seek，也不会提前结束。
+2. **编码成了 yuv444p**：`_write_frames` 把 bgr24 直接塞给 libx264，没指定
+   `pix_fmt`，x264 选了 `High 4:4:4 Predictive`。手机/抖音/多数播放器解不了
+   4:4:4，表现就是“前几秒正常、后面卡住”，同时码率飙到 29Mbps
+   （3.5 秒 12.8MB）。现在显式 `pix_fmt='yuv420p'`。
+3. **容器时长跟音频走**：音频（变调 + BGM 混音后）比视频流长 0.7 秒，
+   容器时长取最大值，播放器把最后一帧定住 → 又一处“卡住”。加了 `-shortest`。
+
+另外 **10 分钟的耗时** 主因是频域扰乱 `scramble_phase`：4K 帧做全分辨率
+2D FFT（3 通道正 + 逆）每帧 5.4 秒，250 帧光这一项就 20+ 分钟。现在大尺寸帧
+先缩到 720 长边再 FFT、升采样回原尺寸与原帧按 0.35 混合（视觉几乎无差别，
+实测与原帧 RMS 差异 1.9），单帧 5.4s → 0.17s。顺带把批大小按像素预算限到
+256MB（4K 下 100 帧要 2.5GB 常驻）。
+
+修复前后（同一段 4K HEVC 源，`Upload/videos` 里的成品）：
+
+| 指标 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 处理耗时 | 10 分 02 秒 | 1 分 30 秒 |
+| 视频帧数 | 100 / 250（截断） | 250 / 250 |
+| 逐帧哈希唯一数 | — | 250 / 250（无重复帧） |
+| 像素格式 | yuv444p（4:4:4） | **yuv420p** |
+| 输出时长 | 视频 3.48s / 容器 9.1s（末帧冻结） | 视频 8.708s / 音频 8.707s |
+| 文件大小 | 12.8MB（3.5 秒） | 27MB（8.7 秒，27Mbps 的 4K 正常量级） |
+| 进度日志 | 无 | 每 25 帧打一次“平均 N 帧/秒” |
+
+新增回归测试：编码参数（`pix_fmt='yuv420p'` 与 `-shortest` 必须在 kwargs 里）、
+大帧 scramble 必须走缩小路径（monkeypatch 检查传给 `_scramble_fft` 的尺寸）。
+另外给 `Dedup/filters.py` 补了 `TYPE_CHECKING` 导入，顺手消掉 15 个 F821。
+
+### 8. 第一次真发布成功（2026-11-14 17:29）
+
+用户更新 cookie 后 `python Upload/export_cookie.py`（74 条 cookie）→ 创作者中心
+headless 直接进上传页 → `python Upload/douyin_upload.py`：
+
+```text
+[+] cookie 有效
+[+]正在上传-------🐱🐶🌧️ 因为太可爱了，所以放大看看👀 #今天是太阳雨.mp4
+[-] 正在填充标题和话题... 总共添加1个话题
+[-]视频上传完毕
+[-] 关掉引导浮层：我知道了          <- 之前“点发布没反应”的真凶
+[-]视频发布成功                     <- 跳转到 content/manage
+[-]cookie更新完毕！ 全部上传成功：1 个视频
+```
+
+退出码 0；`Upload/videos` 里的成品被正常删除；创作者中心作品数 3 → **4**，
+新作品状态“审核中”。**整条链路（抓取 → 下载 → 去重 → 发布）第一次全自动跑通，
+全程无窗口。**
+
+### 9. 验证结果（2026-11-14，本机 dy）
+
+- `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
+  firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
+- `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
+- `pytest -q`：**203 passed**（原 152 + 17 个 win_env 测试 + 5 个
+  `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
+- `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
+  均无解析器报错，中文显示正常。
+- 新增 `tests/test_win_env.py`（17 个）：钉住“.bat 纯 ASCII / CRLF / 必须
+  `chcp 65001` / 不许再 `call` 批处理”这几条约束，以及解释器解析、
+  `Upload\videos` 清理只删 mp4、`--help` 可跑。
+
 ## 多博主抓取 + 抖音上传接入流水线（2026-11-12，未推送）
 
 Moon 要求把抖音搬抖音接进自动流水线，并支持多个博主抓取。
@@ -397,12 +693,13 @@ python main.py
 
 ## 不确定的地方 / 已知遗留问题
 
-- **依赖完整安装未在本机验证**：`pip install --dry-run -r requirements.txt`
-  在本机沙箱里失败，原因是沙箱代理环境变量（`NO_PROXY` 里的 IPv6 写法）让
-  pip 隔离构建环境里的 httpx 解析报错，与版本本身无关；逐个下载验证时 24/25
-  个包可正常下载，`biliup==1.3.5`（仅提供 sdist）同样卡在沙箱代理问题上，
-  `pywin32==312` 只有 Windows 包，在 Linux 下下载失败是预期的（有平台标记）。
-  在目标 Windows 机器上首次安装时请先小规模验证。
+- **依赖完整安装（已在本机 Windows 验证，2026-11-14）**：早期写的“未验证”
+  现在有结论了：原锁定组合确实装不上，原因是 f2 硬钉 `pyyaml==6.0.2` /
+  `qrcode==8.0` / `pytest==8.3.4`，以及 `biliup==1.3.5` 在 Windows 上只有
+  sdist 需要 Rust + MSVC。已按上文“Windows 批处理中文乱码 + conda 环境一键
+  配置”一节改三处版本，`setup.bat` 在 conda 环境 `dy`（Python 3.13.18）里
+  跑通，`pytest` 169 个全过。仍存的差异：目标 Python 是 3.13 而锁定说明按
+  3.12 写的；`biliup` 用 1.2.9（上游锁 1.3.5），B 站上传流程**没有**真实跑过。
 - **两个大版本升级需验证**：`opencv-python` 5.0.0.93（相对常见的 4.x）与
   `openai` 3.49.0（相对常见的 1.x）都是大版本升级，只做了版本锁定，没有跑过
   实际视频处理与 AI 调用流程。

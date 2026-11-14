@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generator, List, Tuple
 
@@ -102,6 +103,11 @@ class VideoHandler:
         width, height, fps = FFmpegHandler.get_video_properties(input_path)
         cap = cv2.VideoCapture(input_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # 按分辨率限制批大小：4K 单帧就 25MB，按 CPU 数×10 算成 100 帧 =
+        # 2.5GB 常驻（再加上处理后的副本），很容易把内存吃满。给每批一个
+        # 256MB 的预算，4K 下大约 10 帧一批。
+        frame_bytes = max(width * height * 3, 1)
+        self.batch_size = max(4, min(self.batch_size, (256 * 1024 * 1024) // frame_bytes))
         temp_files = []
         subtitles_file = None
 
@@ -164,34 +170,46 @@ class VideoHandler:
             audio_stream = self._apply_audio_effects(
                 audio_stream, self.config, audio_sample_rate)
 
-            # 定义帧交换索引映射函数
-            def get_original_idx(output_idx, interval, total_frames):
-                if interval <= 0 or not self.config.enable_frame_swap:
-                    return output_idx
-                k = output_idx // interval
-                if output_idx % interval == 0 and k * interval + 1 < total_frames:
-                    return k * interval + 1
-                elif output_idx % interval == 1 and k * interval + 1 < total_frames:
-                    return k * interval
-                else:
-                    return output_idx
-
-            # 定义交换帧生成器
-            def swapped_frame_generator(cap, total_frames, interval):
-                output_idx = 0
-                while output_idx < total_frames:
-                    original_idx = get_original_idx(output_idx, interval, total_frames)
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, original_idx)
-                    ret, frame = cap.read()
-                    if ret:
-                        yield output_idx, frame
-                        output_idx += 1
-                    else:
-                        break
+            # 定义帧交换生成器（流式，不 seek）
+            #
+            # 原实现是“对每个输出帧 cap.set(POS_FRAMES) 再 read”，在 HEVC 4K 上
+            # 逐帧定位要 170 秒（8 秒的视频！），而且 seek 失败就直接 break，
+            # 会造成输出视频被截断。这里改成顺序读 + 每块内交换前两帧，
+            # 内存只用 1 帧，语义与 get_original_idx 一致。
+            def swapped_frame_generator(cap, interval):
+                out_idx = 0
+                pending = None          # 当前块的第 0 帧，等第 1 帧来了再一起吐
+                block_pos = 0           # 当前块内已处理的帧数
+                for _in_idx, frame in self._frame_generator(cap):
+                    if interval <= 1:
+                        yield out_idx, frame
+                        out_idx += 1
+                        continue
+                    if block_pos == 0:
+                        pending = frame
+                        block_pos = 1
+                        continue
+                    if block_pos == 1:
+                        # 先输出第 1 帧，再输出第 0 帧（交换）
+                        yield out_idx, frame
+                        out_idx += 1
+                        yield out_idx, pending
+                        out_idx += 1
+                        pending = None
+                        block_pos = 2
+                        continue
+                    yield out_idx, frame
+                    out_idx += 1
+                    block_pos += 1
+                    if block_pos >= interval:
+                        block_pos = 0
+                # 尾块只剩一帧时原样输出（没有可交换的对象）
+                if pending is not None:
+                    yield out_idx, pending
 
             # 根据 enable_frame_swap 选择帧生成器
             if self.config.enable_frame_swap:
-                frame_generator = swapped_frame_generator(cap, total_frames, self.config.frame_swap_interval)
+                frame_generator = swapped_frame_generator(cap, self.config.frame_swap_interval)
             else:
                 frame_generator = self._frame_generator(cap)
 
@@ -379,12 +397,31 @@ class VideoHandler:
         video_stream = ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', 
                                     s=f'{adjusted_width}x{adjusted_height}', framerate=fps)
         process = video_stream.output(
-            audio_stream, output_path, vcodec='libx264', acodec='aac', preset='fast', 
-            crf=23, **{'b:v': '2M'}, r=fps, s=f'{adjusted_width}x{adjusted_height}'
+            audio_stream, output_path, vcodec='libx264', acodec='aac', preset='fast',
+            # 必须显式 yuv420p：管道里送的是 bgr24，x264 会默认选 yuv444p
+            #（High 4:4:4 Predictive），手机/抖音/多数播放器解不了，表现为
+            # “前几秒正常后面一帧卡住”，文件也大到离谱（同片 12.8MB -> 2MB）。
+            pix_fmt='yuv420p', crf=23,
+            # 音频（变调/变速 + BGM 混音后）可能比视频流长一点，不加 -shortest 时
+            # 容器时长跟音频走，播放器会把最后一帧定住几百毫秒（看着像“卡住”）。
+            shortest=None,
+            r=fps, s=f'{adjusted_width}x{adjusted_height}'
         ).overwrite_output().run_async(pipe_stdin=True)
+        written = 0
+        started = time.time()
         process.stdin.write(first_frame.tobytes())
+        written += 1
         for frame in frame_generator:
             process.stdin.write(frame.tobytes())
+            written += 1
+            # 每 25 帧打一下进度与速度：4K 源很贵，看不清是哪一步慢的时候有用
+            if written % 25 == 0:
+                logging.info(
+                    f"已写入 {written} 帧，平均 {written / (time.time() - started):.1f} 帧/秒"
+                )
         process.stdin.close()
         process.wait()
-        logging.info(f"视频处理完成，输出到 {output_path}")
+        logging.info(
+            f"视频处理完成，写入 {written} 帧（{written / max(time.time() - started, 1e-6):.1f} 帧/秒），"
+            f"输出到 {output_path}"
+        )

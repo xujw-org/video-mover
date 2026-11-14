@@ -166,3 +166,32 @@ def test_gaussian_blur_applies_only_on_interval_frames(tmp_path):
     assert np.array_equal(VideoEffects.apply_gaussian_blur(frame, config, 3), frame)
     out = VideoEffects.apply_gaussian_blur(frame, config, 15)
     assert out.shape == frame.shape
+
+
+def test_scramble_phase_downscales_fft_for_large_frames(monkeypatch):
+    """4K 帧必须走“缩小再 FFT”的快路径：全尺寸 FFT 每帧 5 秒多。"""
+    from Dedup.filters import VideoEffects
+
+    seen = []
+    original = VideoEffects._scramble_fft
+
+    def spy(frame, frequency):
+        seen.append(frame.shape)
+        return original(frame, frequency)
+
+    monkeypatch.setattr(VideoEffects, "_scramble_fft", staticmethod(spy))
+
+    cfg = VideoConfig()
+    cfg.scramble_frequency = 0.09
+    big = np.random.randint(0, 255, (1080, 1920, 3), dtype=np.uint8)
+    out = VideoEffects.scramble_phase(big, cfg)
+
+    assert out.shape == big.shape
+    assert seen, "_scramble_fft 没被调用"
+    assert max(seen[0][:2]) <= VideoEffects._SCRAMBLE_MAX_SIDE
+
+    # 小图仍然走全尺寸，效果保持原样
+    seen.clear()
+    small = np.random.randint(0, 255, (240, 180, 3), dtype=np.uint8)
+    VideoEffects.scramble_phase(small, cfg)
+    assert seen and seen[0][:2] == small.shape[:2]

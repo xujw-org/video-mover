@@ -81,12 +81,44 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
    cd video-mover
    ```
 
-2. Run `setup.bat` to install Python, Node.js, Playwright, and related dependencies. An isolated virtual environment is recommended.
+2. Create a conda environment (`dy` is the default name used by the scripts; use any name you like):
 
-3. **Dependency patches (critical step)**: to stay compatible with real platform interfaces, two small changes are required inside the installed third-party libraries in your virtual environment:
-   - `f2/apps/tiktok/handler.py` (~line 389): change `params={"cursor": cursor, ...}` to `params={"cursor": int(cursor), ...}`;
-   - `f2/utils/utils.py` (~lines 200 / 690): extend date-string parsing to accept both `YYYY-MM-DD` and datetime formats;
-   - `tencent_uploader/main.py` (~line 191): raise the page-navigation wait timeout from 1500ms to 10000ms to avoid false failures on slow networks.
+   ```bash
+   conda create -y -n dy python=3.12
+   ```
+
+3. Run `setup.bat` (pass another environment name as the first argument if needed: `setup.bat myenv`).
+   It upgrades pip, installs `requirements.txt` and `requirements-dev.txt`, installs the
+   Playwright browsers (chromium / firefox), applies the upstream patches and then checks
+   that `ffmpeg` / `ffprobe` are on `PATH`. To re-check an existing environment:
+
+   ```bash
+   python scripts/win_env.py check --env dy
+   ```
+
+   > **Why the `.bat` files contain no Chinese text**: cmd.exe decodes batch files with the
+   > system code page (cp936 on Simplified Chinese Windows), so UTF-8 Chinese text is
+   > garbled. Adding `chcp 65001` fixes the display but makes the cmd batch parser lose
+   > track of byte offsets around multi-byte characters, occasionally executing half a
+   > line as a command. The two `.bat` files are therefore ASCII-only: they locate the
+   > interpreter and hand over to `scripts/win_env.py`, which prints all localized
+   > (Chinese) messages. Please keep them ASCII-only when editing.
+
+4. **Dependency patches (already automated)**: `scripts/apply_upstream_patches.py` applies
+   the three compatibility edits to the installed third-party libraries (`f2` handlers /
+   utils, WeChat Channels uploader timeout). `setup.bat` runs it automatically;
+   add `--check` to only inspect. Patch verification targets `f2==0.0.1.7`, see
+   [PATCHES.md](./PATCHES.md). Re-run after reinstalling or upgrading dependencies.
+
+5. **Download the binary assets**: fonts, background music, watermark images, picture-in-
+   picture video and README screenshots were removed from the repository. Run
+   (`setup.bat --with-assets` does this for you):
+
+   ```bash
+   python scripts/download_assets.py
+   ```
+
+   See [ASSETS.md](./ASSETS.md).
 
 ### Configuration
 
@@ -96,11 +128,14 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 
 ### Run
 
-Double-click `start.bat`, or execute:
+Double-click `start.bat` (or `start.bat env-name` from a shell), or execute directly:
 
 ```bash
 python main.py
 ```
+
+`start.bat` clears the historical mp4 files in `Upload\videos` and then starts `main.py`.
+To only verify the environment without starting: `start.bat dy --dry-run`.
 
 The program opens a browser and starts the tasks; complete the first login as prompted, then the pipeline runs automatically.
 

@@ -95,7 +95,7 @@ Content input
 ### 环境要求
 
 - Windows
-- Python 3.12+
+- Python 3.12+（推荐用 conda 环境，脚本默认环境名为 `dy`）
 - Node.js 22.x
 - FFmpeg（需加入 `PATH`）
 - Chrome
@@ -109,17 +109,38 @@ Content input
    cd video-mover
    ```
 
-2. 运行 `setup.bat`，自动安装 Python、Node.js、Playwright 与相关依赖，并自动运行
-   上游兼容补丁脚本。建议在独立虚拟环境中运行。
+2. 准备 conda 环境（下面命令里的 `dy` 就是默认环境名，可以换成你喜欢的名字）：
 
-3. **依赖补丁（已自动化）**：为兼容目标平台接口，需要对已安装的 f2 等上游库做
+   ```bash
+   conda create -y -n dy python=3.12
+   ```
+
+3. 运行 `setup.bat`（当前已激活环境名不是 `dy` 时，用参数指定：`setup.bat 环境名`）。
+   它会依次执行：升级 pip → 安装 `requirements.txt` → 安装 `requirements-dev.txt`
+   → 安装 Playwright 浏览器（chromium / firefox）→ 应用上游兼容补丁 → 检查
+   `ffmpeg` / `ffprobe` 是否在 `PATH` 中。
+
+   安装完成后想复查环境，执行：
+
+   ```bash
+   python scripts/win_env.py check --env dy
+   ```
+
+   > **关于 `.bat` 里的中文**：`setup.bat` / `start.bat` 刻意只用 ASCII 字符。
+   > cmd.exe 默认按系统代码页（简体中文 Windows 是 cp936）解释批处理文件，
+   > UTF-8 中文会乱码；加 `chcp 65001` 能修显示，却会触发 cmd 批处理解析器
+   > 在多字节字符上的偏移错位，把半行内容当命令执行。所以两个 `.bat` 只做
+   > 定位解释器和转交，所有中文提示都由 `scripts/win_env.py` 输出（UTF-8 源码
+   > + `chcp 65001` 控制台，显示正常）。改动 `.bat` 时请保持纯 ASCII。
+
+4. **依赖补丁（已自动化）**：为兼容目标平台接口，需要对已安装的 f2 等上游库做
    三处小改动，现已收进 `scripts/apply_upstream_patches.py`，`setup.bat` 会自动
    运行它；也可以手动执行 `python scripts/apply_upstream_patches.py`（只检查不
    改动：加 `--check`）。补丁针对 f2==0.0.1.7 核对过，详见 [PATCHES.md](./PATCHES.md)。
    每次重装或升级依赖后请重新运行一次。
 
-4. **下载二进制资产**：字体、背景音乐、水印图、画中画视频、README 截图等大文件
-   已移出仓库，首次运行前执行：
+5. **下载二进制资产**：字体、背景音乐、水印图、画中画视频、README 截图等大文件
+   已移出仓库，首次运行前执行（`setup.bat --with-assets` 也会顺手做这一步）：
 
    ```bash
    python scripts/download_assets.py
@@ -167,33 +188,83 @@ Content input
    环境变量清单见 `.env.example`（复制为 `.env` 后填写；`.env` 不进仓库）。
    缺失的配置项会打警告并用默认值补齐；`interval_minutes` 超出 1-1440 或时区
    不合法时会直接报错退出。
+
+   下载目录 `download_dir` 不写时按博主推导为
+   `Download/<platform>/post/<account>`。f2 的真实落盘结构是
+   `Download/<app>/<mode>/<昵称>/<作品时间>/`：配到 `<昵称>` 这层，或往上
+   配到 `<mode>` 层（如 `Download/douyin/post`），去重扫描都能找到
+   （见 `main.py` 的 `FileManager._iter_work_dirs`）。
    下方的 `douyin` / `tiktok` / `weibo` / `twitter` 小节是 f2 的平台配置，
    其中的 cookie 与代理请填你自己的真实值。
    抖音抓取用的就是 `douyin` 小节里的 cookie（下载也要登录态）。
 
-2. 抖音上传首次登录（只需一次，cookie 过期后重扫即可）：
+2. 抖音上传 cookie（两种方式，**推荐第一种**）：
 
    ```bash
+   # 方式一：把上面填的 douyin.cookie 直接转成上传器的 cookie 文件
+   # （creator.douyin.com 与 www.douyin.com 共用 .douyin.com 作用域的 cookie，
+   #   实测 headless 能直接进上传页，不需要扫码、不弹浏览器）
+   python Upload/export_cookie.py
+
+   # 方式二：传统扫码登录（cookie 失效又不想重新导网页 cookie 时用）
    python Upload/cli_main.py douyin <账号名> login
    ```
 
-   按提示在弹出的浏览器里扫码，cookie 会保存在
-   `Upload/cookies/douyin_<账号名>.json`。`<账号名>` 要和 `my_apps.yaml` 里
-   `video_mover.upload.douyin_account` 填的一致。上传脚本在调度里跑时如果
-   cookie 失效会直接退出并打印重登录提示，不会在无人值守时弹浏览器。
+   cookie 保存在 `Upload/cookies/douyin_<账号名>.json`。`<账号名>` 要和
+   `my_apps.yaml` 里 `video_mover.upload.douyin_account` 填的一致。
+
+   上传默认**无窗口**（headless）运行，不会在桌面弹 Chrome。`video_mover.upload`
+   里两个可选开关：
+
+   ```yaml
+   upload:
+     headless: true   # false = 有界面，方便盯界面排查
+     dry_run: false   # true = 只填到“发布”按钮前，不真正发布、不删文件
+   ```
+
+   cookie 失效时上传脚本直接退出并打印重导指引，不会在无人值守时弹浏览器。
 
 2. 如启用 AI 文案功能，通过安全的本地配置方式提供 API Key，切勿提交到仓库。
 3. 首次运行平台适配器时，根据提示完成账号登录与 Cookie 初始化。
 
 ### 运行
 
-双击 `start.bat`，或执行：
+双击 `start.bat`（或在命令行 `start.bat 环境名`），也可以直接执行：
 
 ```bash
 python main.py
 ```
 
+`start.bat` 会先清空 `Upload\videos` 里的历史 mp4，再启动 `main.py`。只想确认环境
+是否装好、不想真的启动时：`start.bat dy --dry-run`。
+
 程序会自动打开浏览器并执行任务，按提示完成首次登录即可进入自动化流程。
+
+### 抖音抓取通道（2026-11-14 起）
+
+抖音**不再走 f2**：抖音现在对 `/aweme/v1/web/aweme/post/` 强制 Argus secsdk
+签名（`x-secsdk-web-signature` + `uifid`/`webid`/`fp`/`timestamp`），而 f2 0.0.1.7
+的请求里没有这些字段，必然返回 403。改用 `douyin_fetch.py` 的**浏览器通道**：
+用 Chromium 打开博主主页、直接读页面自己发出的接口响应（签名由页面 JS 完成），
+再按视频直链下载，落盘结构与 f2 一致：
+
+```text
+Download/<平台>/post/<昵称>/<作品时间>/<aweme_id>.mp4
+```
+
+`main.py` 会按平台自动分流：`douyin` 源走浏览器通道，tiktok 等其它平台仍走 f2
+子进程。图文（相册）作品不是视频，会跳过。
+
+首次使用需要装好浏览器：`python -m playwright install chromium`（`setup.bat`
+已经做了）。手动补抓历史（调度窗口只有 `interval_minutes`，最长 24 小时）：
+
+```bash
+python douyin_fetch.py --url "https://www.douyin.com/user/xxxx" --days 30
+python douyin_fetch.py --url "..." --since "2026-11-01 00-00-00" --dry-run
+```
+
+想把抓取过程摊到 Burp / mitmproxy 里看：`--config` 指向一份把
+`douyin.proxies` 设成代理地址的配置文件即可（会自动放行代理的自签证书）。
 
 ## 当前限制
 
