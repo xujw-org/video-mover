@@ -414,12 +414,75 @@ C 盘本来就在 93% 左右的临界区，这次只是压垮它的最后一根�
 `unknown`，作品全被下到 `Download/.../unknown/`；现在退回用作品里的
 `author.nickname`。
 
-### 12. 验证结果（2026-11-14，本机 dy）
+### 12. cookie 反复失效的元凶：无头浏览器的指纹
+
+现象：今天 3 次自动发布（17:29 / 17:49 / 18:07）之后，抖音把会话判失效
+（`www` 和 `creator` 都退回扫码页）。查了一圈，**不是 cookie 过期**：
+
+- `sid_guard` = `<sig>|1794645733|5184000|Wed, 13-Jan-2027`
+  → 签发于今天 16:42（正好是重新登录的时间），有效期 60 天，还剩 2 个月；
+- `sessionid` / `sid_tt` / `ttwid` / `UIFID` 在 yaml 与上传器 storage_state 里一致。
+
+真正的原因在浏览器指纹。上传器原来这样开上下文：
+
+```python
+browser = await playwright.chromium.launch(headless=True)
+context = await browser.new_context(storage_state=account_file)
+```
+
+实测这套参数发出的请求是：
+
+| 指纹 | 值 |
+| --- | --- |
+| `User-Agent` | `... HeadlessChrome/158.0.8127.18 Safari/537.36` |
+| `navigator.webdriver` | `true` |
+| `Sec-Ch-Ua` | `"Chromium";v="158", "Not.A/Brand";v="24", **"HeadlessChrome";v="158"** |
+| `viewport` | 1280×720 |
+| `Accept-Language` | en-US（真机是 zh-CN） |
+
+也就是：**cookie 是真人 Chrome 签发的，但发布动作来自一个自称 HeadlessChrome 的
+浏览器** —— 同一个 sessionid 前后指纹不一致，抖音风控直接吊销会话。
+`Upload/utils/stealth.min.js` 帮不上忙：它里面**一处** `userAgent` 都没有，只改 JS 层，
+HTTP 头（尤其是 Client Hints）原样泄露。
+
+注意：**只改 UA 不够**。实测覆盖 `user_agent` 之后，`Sec-Ch-Ua` 仍然是
+`"HeadlessChrome";v="158"`，服务器读的就是这个头。必须连
+`sec-ch-ua` / `sec-ch-ua-mobile` / `sec-ch-ua-platform` 一起覆盖。
+
+修复（`Upload/uploader/douyin_uploader/main.py`）：
+
+1. 新增 `context_options()`：真 Chrome UA（157）+ `viewport 1920×1080` +
+   `locale zh-CN` + `timezone Asia/Shanghai` + 覆盖三条 `sec-ch-ua*` 头；
+2. 新增 `launch_options()`：统一带 `--disable-blink-features=AutomationControlled`
+   （去掉 `navigator.webdriver`）；
+3. **扫码登录也走同一套参数**，保证“签发 session 的设备”和“发布用的设备”是同一台；
+4. 抓取器 `douyin_fetch.py` 同样补上 Client Hints 覆盖（之前只改了 UA）。
+
+实测（修复后，`https://httpbin.org/headers` 读到的真实请求头）：
+
+```
+User-Agent         : ... Chrome/157.0.0.0 Safari/537.36
+Sec-Ch-Ua          : "Google Chrome";v="157", "Chromium";v="157", "Not.A/Brand";v="24"
+Sec-Ch-Ua-Mobile   : ?0
+Sec-Ch-Ua-Platform : "Windows"
+navigator.webdriver: False      viewport: 1920x1080   lang: zh-CN
+```
+
+另外两个顺带治掉的风险点：
+
+- **发布不再重试**：旧代码 `while True` 狂点“发布”（今天 17:29 那次就被引导浮层
+  挡住、点了无数次），这是最典型的机器特征。现在只点一次，20 秒没跳转就截图报错；
+- **`export_cookie.py` 不再用旧 cookie 覆盖新 session**：抖音每次登录/发布都会重签
+  `sid_guard`，而上传器会回写 storage_state；如果又拿 yaml 里的旧 cookie 导一次，
+  等于把新 session 覆盖回旧的。现在会比较两边 `sid_guard` 的签发时间，发现输出
+  文件更新就跳过（要强覆盖加 `--force`）。
+
+### 13. 验证结果（2026-11-14，本机 dy）
 
 - `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
   firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
 - `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
-- `pytest -q`：**214 passed**（原 152 + 17 个 win_env 测试 + 5 个
+- `pytest -q`：**220 passed**（原 152 + 17 个 win_env 测试 + 5 个
   `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
 - `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
   均无解析器报错，中文显示正常。

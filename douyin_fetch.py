@@ -43,6 +43,10 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
 )
+# UA 改了还不够：Chromium 的客户端提示仍会写
+#   sec-ch-ua: "Chromium";v="158", ..., "HeadlessChrome";v="158"
+# 服务端读这个头就知道是无头浏览器（抖音风控会据此吊销 session）。
+DESKTOP_CH_UA = '"Google Chrome";v="157", "Chromium";v="157", "Not.A/Brand";v="24"'
 TIME_FMT = "%Y-%m-%d %H-%M-%S"
 PROFILE_API_MARK = "/aweme/v1/web/aweme/post/"
 
@@ -318,7 +322,13 @@ def fetch_profile_awemes(
             str(profile_dir),
             user_agent=user_agent,
             locale="zh-CN",
-            viewport={"width": 1400, "height": 900},
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "sec-ch-ua": DESKTOP_CH_UA,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            },
             # 走 Burp 之类的拦截代理时，HTTPS 证书是代理自签的，必须放行才能
             # 看到明文（只在调试代理时才需要开）。
             ignore_https_errors=ignore_https_errors,

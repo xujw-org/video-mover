@@ -53,10 +53,55 @@ async def _looks_like_login_page(page) -> bool:
     return False
 
 
+# 抖音风控会比对“sessionid 的签发设备”和“正在使用它的浏览器”是否同一台。
+# Playwright 的 headless Chromium 默认 UA 是
+#   ...HeadlessChrome/158.0.8127.18 Safari/537.36
+# 服务器一看就知道是无头浏览器，于是把这个 session 判成可疑并强制登出 ——
+# 这正是发布几次之后 cookie 就失效的元凶（stealth.min.js 只改 JS 层，
+# 屏蔽不了 HTTP 头里的 UA）。所以所有抖音上下文统一用真 Chrome 的 UA/视口/语言/时区。
+DESKTOP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+)
+
+
+# Chromium 的 UA 伪造了，但 **客户端提示（Client Hints）** 还是暴露真实身份：实测
+#   sec-ch-ua: "Chromium";v="158", "Not.A/Brand";v="24", "HeadlessChrome";v="158"
+# 服务端只要读这个头就知道是无头浏览器，所以必须一起覆盖。
+DESKTOP_CH_UA = '"Google Chrome";v="157", "Chromium";v="157", "Not.A/Brand";v="24"'
+
+
+def context_options() -> dict:
+    """抖音浏览器上下文统一参数（UA/客户端提示/视口/语言/时区/DPR）。"""
+    return {
+        "user_agent": os.environ.get("DOUYIN_UPLOAD_UA", DESKTOP_UA),
+        "viewport": {"width": 1920, "height": 1080},
+        "locale": "zh-CN",
+        "timezone_id": "Asia/Shanghai",
+        "device_scale_factor": 1,
+        "extra_http_headers": {
+            "sec-ch-ua": DESKTOP_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        },
+    }
+
+
+def launch_options(headless: bool, executable_path: str | None = None) -> dict:
+    """Chromium 启动参数：关掉 AutomationControlled，避免 navigator.webdriver。"""
+    options: dict = {
+        "headless": headless,
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    if executable_path:
+        options["executable_path"] = executable_path
+    return options
+
+
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=account_file)
+        browser = await playwright.chromium.launch(**launch_options(headless=True))
+        context = await browser.new_context(storage_state=account_file, **context_options())
         context = await set_init_script(context)
         # 创建一个新的页面
         page = await context.new_page()
@@ -92,13 +137,10 @@ async def douyin_setup(account_file, handle=False):
 
 async def douyin_cookie_gen(account_file):
     async with async_playwright() as playwright:
-        options = {
-            'headless': False
-        }
-        # Make sure to run headed.
-        browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
+        # 用和上传时完全一致的 UA/视口/语言/时区登录，
+        # 这样抖音记录的“设备”就是之后发布用的那个设备。
+        browser = await playwright.chromium.launch(**launch_options(headless=False))
+        context = await browser.new_context(**context_options())
         context = await set_init_script(context)
         # Pause the page, and start recording manually.
         page = await context.new_page()
@@ -165,33 +207,38 @@ class DouYinVideo(object):
         以前这里是 `while True` 死循环，且只认跳转到 content/manage 为成功；
         遇到引导浮层遮住按钮时就永远在循环里狂点发布。
         """
-        for attempt in range(1, 4):
-            await self._dismiss_guides(page)
-            publish_button = page.get_by_role('button', name="发布", exact=True)
-            if not await publish_button.count():
-                douyin_logger.error("  [-] 找不到“发布”按钮")
-                break
-            await publish_button.first.click()
+        await self._dismiss_guides(page)
+        publish_button = page.get_by_role('button', name="发布", exact=True)
+        if not await publish_button.count():
+            raise RuntimeError("抖音发布未成功：页面上找不到“发布”按钮（引导浮层？）")
+        # 只点一次。重复点发布在抖音风控里是明显的机器特征（旧代码曾经 while True
+        # 狂点几十次），点完没反应就截图、报错、交给人工，不再自己重试。
+        await publish_button.first.click()
+        try:
+            await page.wait_for_url("**/creator-micro/content/manage**", timeout=20000)
+            douyin_logger.success("  [-]视频发布成功")
+            return
+        except Exception:
+            shot = str(self.file_path) + ".publish_failed.png"
             try:
-                await page.wait_for_url("**/creator-micro/content/manage**", timeout=15000)
-                douyin_logger.success("  [-]视频发布成功")
-                return
+                await page.screenshot(path=shot, full_page=True)
             except Exception:
-                douyin_logger.warning(f"  [-] 第 {attempt} 次点发布后未跳转到作品列表")
-                await asyncio.sleep(2)
-        raise RuntimeError("抖音发布未成功：点击“发布”后没有跳转到作品管理页")
+                shot = "(截图失败)"
+            raise RuntimeError(
+                "抖音发布未成功：点击“发布”后 20 秒内没有跳转到作品管理页"
+                f"（截图: {shot}）。为避免触发风控，已停止重试。"
+            )
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例（默认无窗口，见 upload_headless）
         headless = upload_headless()
-        if self.local_executable_path:
-            browser = await playwright.chromium.launch(
-                headless=headless, executable_path=self.local_executable_path
-            )
-        else:
-            browser = await playwright.chromium.launch(headless=headless)
-        # 创建一个浏览器上下文，使用指定的 cookie 文件
-        context = await browser.new_context(storage_state=f"{self.account_file}")
+        browser = await playwright.chromium.launch(
+            **launch_options(headless, self.local_executable_path)
+        )
+        # 创建一个浏览器上下文：cookie 用 storage_state，其余指纹用统一参数
+        context = await browser.new_context(
+            storage_state=f"{self.account_file}", **context_options()
+        )
         context = await set_init_script(context)
 
         # 创建一个新的页面

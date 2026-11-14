@@ -73,6 +73,20 @@ def to_storage_state(cookie_str: str) -> dict:
     return {"cookies": cookies, "origins": []}
 
 
+def sid_issued_at(cookies: dict) -> int:
+    """从 sid_guard 里取“签发时间”（字段 2），拿不到就返回 0。
+
+    sid_guard 形如 ``<hash>|<签发时间戳>|<有效期秒>|<到期日期>``，
+    抖音每次登录/续期都会重新签一个。
+    """
+    raw = cookies.get("sid_guard") or ""
+    try:
+        fields = raw.replace("%7C", "|").split("|")
+        return int(fields[1]) if len(fields) >= 2 else 0
+    except (ValueError, IndexError):
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="把网页 cookie 转成上传器 storage_state")
     parser.add_argument("--config", default=str(REPO_ROOT / "my_apps.yaml"),
@@ -81,6 +95,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="账号名，默认取 video_mover.upload.douyin_account")
     parser.add_argument("--output", default=None,
                         help="输出文件，默认 Upload/cookies/douyin_<账号>.json")
+    parser.add_argument("--force", action="store_true",
+                        help="即使输出文件里的 sid_guard 更新也照样覆盖")
     args = parser.parse_args(argv)
 
     config_path = Path(args.config)
@@ -100,6 +116,26 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output) if args.output else UPLOAD_DIR / "cookies" / f"douyin_{account}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     state = to_storage_state(cookie)
+
+    # 别用旧的 yaml cookie 覆盖上传器刚续期出来的新 cookie：
+    # 抖音每次登录/发布都会重签 sid_guard，覆盖回去等于把新 session 作废，
+    # 下一次自动化就会用旧 session 被踢下线。
+    if output.is_file() and not args.force:
+        try:
+            old_state = json.loads(io.open(output, encoding="utf-8").read())
+            old_cookies = {c["name"]: c["value"] for c in old_state.get("cookies", [])}
+            new_cookies = {c["name"]: c["value"] for c in state["cookies"]}
+            old_at, new_at = sid_issued_at(old_cookies), sid_issued_at(new_cookies)
+            if old_at and new_at and new_at < old_at:
+                print(
+                    f"跳过：{output.name} 里的 sid_guard 更新（{old_at} > yaml 的 {new_at}），"
+                    "用旧 cookie 覆盖会把新 session 作废。确定要覆盖就加 --force。"
+                    "（建议改成从浏览器重新导出最新 cookie 到 my_apps.yaml）"
+                )
+                return 1
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"（检查已有文件失败，继续覆盖: {exc}）")
+
     io.open(output, "w", encoding="utf-8").write(json.dumps(state, ensure_ascii=False))
     print(f"已生成 {output}（{len(state['cookies'])} 条 cookie，账号 {account}）")
     print("接下来可以验证登录态：python Upload/douyin_upload.py（或直接跑 start.bat）")
