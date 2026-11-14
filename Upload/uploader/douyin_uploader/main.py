@@ -4,6 +4,7 @@ from datetime import datetime
 from playwright.async_api import Playwright, async_playwright, Page
 import os
 import asyncio
+import time
 
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
@@ -136,18 +137,52 @@ async def douyin_setup(account_file, handle=False):
 
 
 async def douyin_cookie_gen(account_file):
+    """扫码登录并把 session 存成 storage_state。
+
+    以前这里是 ``await page.pause()``：必须手动在 Playwright Inspector 里点
+    “继续”才会执行保存，直接关窗口就白登录了。现在改成**自动检测登录成功**
+    （轮询 cookie + 进上传页确认不是登录页），检测到就保存，最多等 5 分钟。
+    """
     async with async_playwright() as playwright:
         # 用和上传时完全一致的 UA/视口/语言/时区登录，
         # 这样抖音记录的“设备”就是之后发布用的那个设备。
         browser = await playwright.chromium.launch(**launch_options(headless=False))
         context = await browser.new_context(**context_options())
         context = await set_init_script(context)
-        # Pause the page, and start recording manually.
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/")
-        await page.pause()
-        # 点击调试器的继续，保存cookie
+        douyin_logger.info(
+            "[+] 请在弹出的窗口里扫码/手机号登录，登录成功后会自动保存 cookie"
+            "（最多等 5 分钟，然后窗口会自己关掉）"
+        )
+        logged_in = False
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            try:
+                cookies = {c["name"]: c["value"] for c in await context.cookies()}
+                if cookies.get("sessionid") and cookies.get("sid_guard"):
+                    await page.goto(
+                        "https://creator.douyin.com/creator-micro/content/upload",
+                        timeout=20000,
+                    )
+                    if "creator-micro" in page.url and not await _looks_like_login_page(page):
+                        logged_in = True
+                        break
+            except Exception:  # 页面在跳转/重载，下一轮再看
+                pass
+            await asyncio.sleep(2)
+
+        if not logged_in:
+            await context.close()
+            await browser.close()
+            raise RuntimeError(
+                "登录超时：5 分钟内没检测到登录成功。重新运行 "
+                "python Upload/cli_main.py douyin <账号名> login 再试一次。"
+            )
         await context.storage_state(path=account_file)
+        douyin_logger.success(f"[+] 已保存登录状态到 {account_file}")
+        await context.close()
+        await browser.close()
 
 
 class DouYinVideo(object):

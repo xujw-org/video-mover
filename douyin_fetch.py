@@ -72,6 +72,39 @@ def parse_cookie(cookie_str: str) -> list[dict]:
     return cookies
 
 
+def _sid_issued_at(cookie_pairs: dict) -> int:
+    """sid_guard 的签发时间（第 2 段）；拿不到返回 0。"""
+    raw = str(cookie_pairs.get("sid_guard") or "")
+    try:
+        fields = raw.replace("%7C", "|").split("|")
+        return int(fields[1]) if len(fields) >= 2 else 0
+    except (ValueError, IndexError):
+        return 0
+
+
+def storage_state_cookie(path) -> str:
+    """把 Playwright storage_state 还原成 Cookie 头字符串（只取抖音域）。"""
+    import json as _json
+
+    path = Path(path)
+    if not path.is_file():
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = _json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    parts = []
+    for cookie in state.get("cookies") or []:
+        name, value = cookie.get("name"), cookie.get("value")
+        if not name or value is None:
+            continue
+        if "douyin.com" not in str(cookie.get("domain") or ""):
+            continue
+        parts.append(f"{name}={value}")
+    return "; ".join(parts)
+
+
 def load_douyin_setup(config_path: str | Path) -> dict:
     """从 my_apps.yaml 读 douyin 小节的 cookie / UA / 代理。"""
     path = Path(config_path)
@@ -93,8 +126,28 @@ def load_douyin_setup(config_path: str | Path) -> dict:
         if value:
             proxy = value
             break
+    cookie = str(section.get("cookie") or "").strip()
+    # 上传器登录（Upload/cli_main.py ... login）会把 session 存成 storage_state，
+    # 那份总是比 yaml 里手抄的网页 cookie 新（抖音每次登录都会重签 sid_guard）。
+    # 两边都拿、谁新用谁 —— 否则抓取还拿着旧 sessionid，等于两个“设备”抢同一个号，
+    # 风控会把它们互相顶掉。
+    try:
+        account = str(((data.get("video_mover") or {}).get("upload") or {})
+                      .get("douyin_account") or "default")
+        state_path = Path(config_path).parent / "Upload" / "cookies" / f"douyin_{account}.json"
+        state_cookie = storage_state_cookie(state_path)
+        if state_cookie:
+            yaml_pairs = dict(part.strip().split("=", 1) for part in cookie.split(";") if "=" in part)
+            state_pairs = dict(part.strip().split("=", 1) for part in state_cookie.split(";") if "=" in part)
+            if _sid_issued_at(state_pairs) >= _sid_issued_at(yaml_pairs):
+                logging.info("使用上传器的登录状态（%s）作为抓取 cookie", state_path.name)
+                cookie = state_cookie
+            else:
+                logging.info("yaml 里的网页 cookie 比上传器登录状态新，用 yaml 的")
+    except Exception as exc:  # pragma: no cover - 配置不完整时保持原 cookie
+        logging.debug("读取上传器登录状态失败，继续用 yaml cookie: %s", exc)
     return {
-        "cookie": str(section.get("cookie") or "").strip(),
+        "cookie": cookie,
         "user_agent": headers.get("user-agent") or DEFAULT_USER_AGENT,
         "referer": headers.get("referer") or "https://www.douyin.com/",
         "proxy": proxy,

@@ -254,3 +254,72 @@ def test_nickname_falls_back_to_author_when_title_unusable():
                 nickname = douyin_fetch._safe_name(author)
                 break
     assert nickname == "李雨真Jenny"
+
+
+def test_storage_state_cookie_and_newer_session_wins(tmp_path, monkeypatch):
+    """抓取要跟上上传器的登录状态，否则两边拿不同 sessionid 会互相顶号。"""
+    import json
+    import yaml
+
+    # yaml 里是旧 session
+    old_cookie = (
+        "sessionid=OLD; ttwid=t1; "
+        "sid_guard=guard|1700000000|5184000|Fri%2C+01-Jan-2027"
+    )
+    cfg = tmp_path / "my_apps.yaml"
+    cfg.write_text(yaml.safe_dump({
+        "douyin": {"cookie": old_cookie, "headers": {"User-Agent": "UA-x"}},
+        "video_mover": {"upload": {"douyin_account": "default"}},
+    }, allow_unicode=True), encoding="utf-8")
+
+    # 上传器登录状态里是新 session
+    state = {"cookies": [
+        {"name": "sessionid", "value": "NEW", "domain": ".douyin.com", "path": "/"},
+        {"name": "ttwid", "value": "t2", "domain": ".douyin.com", "path": "/"},
+        {"name": "sid_guard", "value": "guard|1794645733|5184000|Wed%2C+13-Jan-2027",
+         "domain": ".douyin.com", "path": "/"},
+        {"name": "other", "value": "x", "domain": ".example.com", "path": "/"},
+    ], "origins": []}
+    (tmp_path / "Upload" / "cookies").mkdir(parents=True)
+    (tmp_path / "Upload" / "cookies" / "douyin_default.json").write_text(
+        json.dumps(state), encoding="utf-8")
+
+    setup = douyin_fetch.load_douyin_setup(cfg)
+    assert "sessionid=NEW" in setup["cookie"]
+    assert "ttwid=t2" in setup["cookie"]
+    assert "other=x" not in setup["cookie"]      # 非抖音域的不带
+    assert setup["user_agent"] == "UA-x"
+
+    # 反过来：yaml 更新时仍用 yaml
+    cfg.write_text(yaml.safe_dump({
+        "douyin": {"cookie": "sessionid=NEWER; sid_guard=guard|1800000000|5184000|x"},
+        "video_mover": {"upload": {"douyin_account": "default"}},
+    }, allow_unicode=True), encoding="utf-8")
+    assert "sessionid=NEWER" in douyin_fetch.load_douyin_setup(cfg)["cookie"]
+
+
+def test_login_flow_no_longer_waits_for_manual_resume():
+    """登录要自动保存，不能依赖在 Inspector 里点“继续”（直接关窗口就白登录）。"""
+    import ast
+    import importlib.util
+    import inspect
+    import sys as _sys
+    import textwrap
+
+    from tests.helpers import REPO_ROOT
+
+    _sys.path.insert(0, str(REPO_ROOT / "Upload"))
+    spec = importlib.util.spec_from_file_location(
+        "dy_main_login", REPO_ROOT / "Upload" / "uploader" / "douyin_uploader" / "main.py")
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules["dy_main_login"] = module
+    spec.loader.exec_module(module)
+
+    src = inspect.getsource(module.douyin_cookie_gen)
+    # 用 AST 找真正的调用（docstring 里提到过 page.pause()，不能用字符串匹配）
+    tree = ast.parse(textwrap.dedent(src))
+    pause_calls = [n for n in ast.walk(tree)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "pause"]
+    assert pause_calls == []
+    assert "storage_state(path=account_file)" in src

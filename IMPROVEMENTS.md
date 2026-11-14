@@ -468,6 +468,16 @@ Sec-Ch-Ua-Platform : "Windows"
 navigator.webdriver: False      viewport: 1920x1080   lang: zh-CN
 ```
 
+再补两处（2026-11-14 晚，重新登录后验证）：
+
+- **登录不再依赖手动点“继续”**：`douyin_cookie_gen` 原来是 `await page.pause()`，
+  必须切到 Playwright Inspector 按继续才会 `storage_state`；直接关窗口就等于白登录。
+  现在改成轮询 `sessionid`+`sid_guard` 并进上传页确认不是登录页，检测到就自动保存；
+- **抓取与上传共用一个 session 身份**：上传器登录会把新 session 写进
+  `Upload/cookies/douyin_<账号>.json`，而 yaml 里手抄的网页 cookie 是旧的
+  （`sessionid` / `ttwid` 都不同）。`load_douyin_setup` 现在比较两边 `sid_guard`
+  签发时间，**谁新用谁**，避免抓取拿着旧 sessionid 和发布端互相顶号。
+
 另外两个顺带治掉的风险点：
 
 - **发布不再重试**：旧代码 `while True` 狂点“发布”（今天 17:29 那次就被引导浮层
@@ -482,7 +492,7 @@ navigator.webdriver: False      viewport: 1920x1080   lang: zh-CN
 - `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
   firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
 - `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
-- `pytest -q`：**220 passed**（原 152 + 17 个 win_env 测试 + 5 个
+- `pytest -q`：**222 passed**（原 152 + 17 个 win_env 测试 + 5 个
   `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
 - `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
   均无解析器报错，中文显示正常。

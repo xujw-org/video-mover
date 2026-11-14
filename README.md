@@ -265,12 +265,20 @@ video_mover:
 已经统一成真 Chrome 指纹（UA + Client Hints + 视口 + 语言 + 时区），所以正常情况
 下 cookie 能撑到 `sid_guard` 的 60 天有效期。如果又失效，按下面顺序查：
 
-1. `sid_guard` 的签发时间（cookie 里第 2 段，形如 `sig|<签发时间戳>|5184000|...`）
+1. 重新登录（会把 session 写到 `Upload/cookies/douyin_<账号>.json`，抓取和上传都用它）：
+
+   ```bash
+   python Upload/cli_main.py douyin default login
+   ```
+
+   登录成功后会自动保存（不再需要手动点 Inspector 的“继续”）。抓取侧会自动
+   选用比 yaml 更新的这份登录状态，所以**不用再手抄网页 cookie**；
+2. `sid_guard` 的签发时间（cookie 里第 2 段，形如 `sig|<签发时间戳>|5184000|...`）
    是不是很久以前 —— 那才是真过期，重新登录即可；
-2. 是不是又用 `export_cookie.py` 把旧 yaml cookie 导回上传器（会作废旧 session，
+3. 是不是又用 `export_cookie.py` 把旧 yaml cookie 导回上传器（会作废旧 session，
    脚本现在会拦下来，需要 `--force` 才覆盖）；
-3. 是不是同时开了多个自动发布（短时间连着发多条，容易被风控盯上）；
-4. 环境变量 `DOUYIN_UPLOAD_UA` 有没有被设成奇怪的 UA。
+4. 是不是同时开了多个自动发布（短时间连着发多条，容易被风控盯上）；
+5. 环境变量 `DOUYIN_UPLOAD_UA` 有没有被设成奇怪的 UA。
 
 ### 临时文件位置
 
