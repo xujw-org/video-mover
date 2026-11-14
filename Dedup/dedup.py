@@ -82,6 +82,10 @@ def main(argv=None) -> None:
                         help="随机参数种子：指定后按该种子抽取参数（可复现）；不指定则按输入文件名派生")
     parser.add_argument("--no-randomize", action="store_true",
                         help="关闭每视频随机参数，恢复原来的固定默认值")
+    parser.add_argument("--bgm", default=None,
+                        help="背景音乐文件路径（指定则自动开启 BGM 混音）")
+    parser.add_argument("--bgm-volume", type=float, default=None,
+                        help="背景音乐音量 0-1（默认用配置随机值）")
     args = parser.parse_args(argv)
     if args.no_randomize:
         config = VideoConfig()
@@ -89,6 +93,14 @@ def main(argv=None) -> None:
         config = VideoConfig.randomized(args.seed)
     else:
         config = VideoConfig.randomized_for(args.input)
+    # 自带的 assets/bgm.mp3 是 220/440Hz 合成嗡鸣（默认已不启用）；
+    # 想用自己的音乐就 --bgm 指定文件。
+    if args.bgm:
+        config.background_music_file = args.bgm
+        config.include_background_music = True
+    if args.bgm_volume is not None and config.include_background_music:
+        config.background_music_volume = args.bgm_volume
+    config.validate()
     # 逐帧特效也用全局 random / np.random（水印位置、颜色偏移、纹理噪声、
     # 频域扰乱），按同一粒种子播种，使同一输入的随机流可复现。
     # 注意：pipeline 用线程池并行处理帧，帧间随机调用的先后顺序仍可能变化，

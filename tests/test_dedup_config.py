@@ -13,7 +13,8 @@ def test_defaults():
     assert config.include_subtitles is False
     assert config.use_whisper is True
     assert config.whisper_model_name == "base"
-    assert config.include_background_music is True
+    # 默认不加 BGM：自带 assets/bgm.mp3 是 220/440Hz 合成嗡鸣，听感像噪音
+    assert config.include_background_music is False
     assert config.background_music_volume == 0.1
     assert config.crop_percentage == 0.1
     assert config.enable_frame_swap is True
@@ -84,3 +85,29 @@ def test_is_valid_color():
     assert VideoConfig.is_valid_color("not-a-color") is False
     assert VideoConfig.is_valid_color("#GGGGGG") is False
     assert VideoConfig.is_valid_color("#FFF") is False
+
+
+def test_bgm_can_be_enabled_with_a_custom_track(tmp_path, monkeypatch):
+    """--bgm 指定自己的音乐时应当自动开启 BGM 混音。"""
+    import Dedup.dedup as shim
+    from tests.helpers import REPO_ROOT
+
+    # 配置里的字体/水印等是相对路径（相对 Dedup/），validate 会检查它们存在
+    monkeypatch.chdir(REPO_ROOT / "Dedup")
+    bgm = tmp_path / "my-music.mp3"
+    bgm.write_bytes(b"x")
+    video = tmp_path / "in.mp4"
+    video.write_bytes(b"x")
+    out = tmp_path / "out.mp4"
+
+    configs = []
+    fake_handler = type("H", (), {"__init__": lambda self, cfg: configs.append(cfg),
+                                  "process_video": lambda self, i, o: None})
+    # 用 monkeypatch 打补丁，别直接改模块属性（会影响别的测试）
+    monkeypatch.setattr(shim, "VideoHandler", fake_handler)
+    shim.main(["-i", str(video), "-o", str(out), "--bgm", str(bgm), "--bgm-volume", "0.2"])
+
+    assert len(configs) == 1
+    assert configs[0].include_background_music is True
+    assert configs[0].background_music_file == str(bgm)
+    assert configs[0].background_music_volume == 0.2

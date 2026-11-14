@@ -329,12 +329,46 @@ headless 直接进上传页 → `python Upload/douyin_upload.py`：
 中间结果必须是 `pcm_f32le`、混音失败要抛错、静音处理后必须补齐时长；
 变调链断言 `resampler=soxr` 与结尾限制器。
 
-### 10. 验证结果（2026-11-14，本机 dy）
+### 10. 噪音的真凶：自带的 BGM 是 220/440Hz 合成嗡鸣 + 限制器失效
+
+用户对比了三个试听版本（`samples/` 下，已 .gitignore）：
+
+| 版本 | 说明 | 用户结论 |
+| --- | --- | --- |
+| `C_原声直通.mp4` | 只重编码 AAC，什么都不处理 | 基准 |
+| `B_无BGM.mp4` | 完整去重处理，不加 BGM | **正常，无噪音** |
+| `A_有BGM.mp4` | 当前默认（含 BGM） | 有噪音 |
+
+两件事：
+
+1. **`Dedup/assets/bgm.mp3` 不是音乐**：频谱最强频点就是 220Hz / 440Hz，
+   窄带能量占比最高 32%，是合成嗡鸣。放在视频下面持续低频 → 听感就是“嗡嗡的噪音”。
+   现在 **默认不启用 BGM**（`include_background_music = False`），要自己的音乐就：
+   `python dedup.py -i in.mp4 -o out.mp4 --bgm D:/music/xxx.mp3 --bgm-volume 0.15`
+   （新增 `--bgm` / `--bgm-volume` 两个命令行参数，不指定则用配置）。
+2. **上一版的限制器其实是假的**：`ffmpeg` 的 `alimiter` 默认 `level=1`
+   （auto level），压完峰值会再自动把电平抬回去 —— 实测峰值仍是 0.00dBFS，
+   AAC 重编码继续削顶（听感“噼/糊”）。改成 `alimiter=limit=0.89:level=0`
+   后，同一输入峰值 -1.01dBFS、超过满量程样本 0 个。
+
+附带纠正一个我自己的测量错误：之前报“源音频峰值 +3dBFS”是用 `-ac 1` 量造成的
+假象（立体声转单声道会抬 3dB）。源音频实际就是 0 dBFS。
+
+修复后重新渲染并发布（18:07）：音频 44.1kHz、8.703s、峰值 **-1.0dBFS**、
+无 BGM，`Upload/videos` 正常清空。
+
+⚠️ **运营上的坑**：这一轮三次自动发布（17:29 / 17:49 / 18:07）之后，
+**抖音把会话判失效了**——发布完成一分钟后，`www.douyin.com` 与
+`creator.douyin.com` 都退回扫码登录页，重新从 `my_apps.yaml` 导出也没用
+（网页 cookie 本身也死了）。也就是说 cookie 撑不住高频自动发布，需要人工
+重新导一次。建议：调度间隔不要太短，或在关键发布后主动检查登录态。
+
+### 11. 验证结果（2026-11-14，本机 dy）
 
 - `setup.bat` 全流程 0 退出码：pip / 依赖 / Playwright（chromium-1254、
   firefox-1572）/ 补丁（3 个 APPLIED 或 ALREADY_APPLIED）/ ffmpeg 8.1.2 全 OK。
 - `scripts/download_assets.py`：11 个资产全部下载并校验大小通过。
-- `pytest -q`：**205 passed**（原 152 + 17 个 win_env 测试 + 5 个
+- `pytest -q`：**206 passed**（原 152 + 17 个 win_env 测试 + 5 个
   `-M`/落盘结构回归 + 14 个 douyin_fetch 测试 + 2 个平台分流测试）。
 - `setup.bat` / `start.bat` 在起始代码页 936 与 65001 两种情况下各连跑 5 次，
   均无解析器报错，中文显示正常。

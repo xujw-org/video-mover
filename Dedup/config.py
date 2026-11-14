@@ -66,7 +66,10 @@ class VideoConfig:
         self.silent_duration: int = 500             # 静音持续时间（毫秒），超过此时间触发静音处理。建议不低于 300ms，过小可能导致音频频繁中断。
 
         # 背景音乐
-        self.include_background_music: bool = True          # 是否添加背景音乐
+        # 是否添加背景音乐。默认关闭：自带的 assets/bgm.mp3 是 220/440Hz 的
+        # 合成嗡鸣，用户实测听感就是“嗡嗡的噪音”（无 BGM 的版本则正常）。
+        # 想用自己的音乐：python dedup.py ... --bgm D:/music/xxx.mp3 --bgm-volume 0.15
+        self.include_background_music: bool = False
         self.background_music_file: str = 'assets/bgm.mp3'  # 背景音乐文件路径
         self.background_music_volume: float = 0.1           # 背景音乐音量，范围0-1。
 
