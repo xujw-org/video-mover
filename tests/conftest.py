@@ -22,6 +22,8 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -40,6 +42,20 @@ def pytest_sessionfinish(session, exitstatus):
             _APP_LOG.unlink()
         except OSError:
             pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_dedup_tmp(tmp_path, monkeypatch):
+    """把 Dedup 的临时目录指到 tmp_path。
+
+    ``Dedup/workspace.temp_wav()`` 默认写到仓库的 ``tmp/``；测试里 pydub/ffmpeg
+    都是替身，会把 7 字节的假 wav 写进去，跑几次测试就攒一堆空文件。这里统一
+    改到 pytest 的临时目录，测试结束自动清掉。
+    """
+    from Dedup import workspace
+
+    monkeypatch.setattr(workspace, "TMP_DIR", tmp_path / "dedup-tmp")
+    yield
 
 
 def _module(name: str, **attrs):
