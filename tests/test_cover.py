@@ -55,5 +55,6 @@ def test_video_duration_and_brightness(tmp_path):
     _make_video(video)
     assert cover.video_duration(video) > 2.5
     # 纯色 navy 帧亮度很低但不为 0；pick_bright_second 必须在时长内
-    at = cover.pick_bright_second(video)
+    at, bright = cover.pick_bright_second(video)
     assert 0 <= at <= cover.video_duration(video)
+    assert 0 <= bright <= 255

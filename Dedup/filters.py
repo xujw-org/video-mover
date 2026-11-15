@@ -31,6 +31,11 @@ except ImportError:  # 未安装 Pillow 时为 None，绘制水印 / 字幕时�
     Image = ImageDraw = ImageFont = None  # type: ignore[assignment]
 
 
+# 淡入时首帧的最低亮度比例（0=纯黑，1=原样）。平台默认截第 0 帧当封面，
+# 压到 0 会让缩略图永远是一张纯黑图，所以给个下限。
+FADE_IN_FLOOR = 0.5
+
+
 class VideoEffects:
     """
     视频特效类，包含水印、字幕、模糊等效果的实现。
@@ -490,7 +495,8 @@ class VideoEffects:
             np.ndarray: 应用淡入淡出效果后的帧
         """
         if frame_idx < config.fade_in_frames:
-            alpha = frame_idx / config.fade_in_frames
+            # 首帧不能压到 0：平台（抖音等）默认拿第 0 帧当封面，alpha=0 就是纯黑缩略图。
+            alpha = FADE_IN_FLOOR + (1.0 - FADE_IN_FLOOR) * (frame_idx / config.fade_in_frames)
             frame = cv2.addWeighted(frame, alpha, np.zeros_like(frame), 1 - alpha, 0)
         elif frame_idx >= total_frames - config.fade_out_frames:
             alpha = (total_frames - frame_idx) / config.fade_out_frames

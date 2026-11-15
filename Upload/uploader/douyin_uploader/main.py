@@ -310,6 +310,16 @@ class DouYinVideo(object):
         遇到引导浮层遮住按钮时就永远在循环里狂点发布。
         """
         await self._dismiss_guides(page)
+        # 封面/作品还在“检测中”时点发布经常毫无反应（实测点完 20 秒不动），先等它跑完
+        for _ in range(30):
+            try:
+                body = await page.locator("body").inner_text()
+            except Exception:
+                break
+            if "封面检测中" not in body and "快速检测中" not in body:
+                break
+            douyin_logger.info("  [-] 等平台检测完成…")
+            await asyncio.sleep(2)
         # 有的账号发布前就被要求先做短信验证（弹窗直接挡在上面）
         if await self._sms_modal_visible(page):
             if upload_headless():
@@ -349,6 +359,15 @@ class DouYinVideo(object):
                     return
             raise RuntimeError("短信验证码通过后仍未发布成功，请到创作者中心手动确认")
 
+        # 点完没跳转：把页面上可能的原因（toast/提示）一起记下来
+        try:
+            body = await page.locator("body").inner_text()
+            hints = [l.strip() for l in body.splitlines()
+                     if any(k in l for k in ("请", "失败", "不能", "稍后", "检测", "封面"))][:5]
+            if hints:
+                douyin_logger.warning(f"  [-] 发布未跳转，页面提示: {hints}")
+        except Exception:
+            pass
         shot = str(self.file_path) + ".publish_failed.png"
         try:
             await page.screenshot(path=shot, full_page=True)
@@ -572,33 +591,49 @@ class DouYinVideo(object):
     async def _upload_cover_in_modal(self, page, image_path: str) -> bool:
         """在当前封面 tab 里塞图并点“完成”。
 
-        每次都要重新取一次 modal：切 tab 后 React 会重渲染，之前拿到的 locator
-        会失效（表现为“弹窗里没有图片上传框”）。
+        弹窗里有多个图片上传框：左侧“生成参考图/AI素材”列表 2 个，真正能换封面的
+        是“上传封面”按钮所在容器里的那一个。旧实现固定取第一个 ``input``，图被塞进
+        参考图列表，封面一直是平台默认的第 0 帧——而处理后的视频首帧是淡入黑场，
+        所以发出去的作品封面永远是黑的。这里按“上传封面”按钮反查它所在容器里的
+        file input。
         """
-        upload_input = None
-        modal = None
+        tagged = False
         for _ in range(6):
-            modal = page.locator("div.dy-creator-content-modal-wrap").last
             try:
-                candidates = modal.locator("input[accept*='image']")
-                if await candidates.count():
-                    upload_input = candidates.first
-                    break
+                tagged = await page.evaluate(
+                    """() => {
+                      const modals = [...document.querySelectorAll(
+                          'div.dy-creator-content-modal-wrap, div.dy-creator-content-modal')]
+                          .filter(e => e.offsetParent);
+                      const m = modals[modals.length - 1];
+                      if (!m) return false;
+                      const btn = [...m.querySelectorAll('*')].find(
+                          e => (e.innerText || '').trim() === '上传封面' && e.offsetParent);
+                      const root = btn && btn.closest('div[class*="container-"]');
+                      const input = root && root.querySelector('input[type="file"]');
+                      if (!input) return false;
+                      input.setAttribute('data-omp-cover-input', '1');
+                      return true;
+                    }"""
+                )
             except Exception:
-                pass
+                tagged = False
+            if tagged:
+                break
             await asyncio.sleep(1.0)
-        if modal is None:
+        if not tagged:
+            douyin_logger.warning("  [-] 找不到“上传封面”的图片输入框")
             return False
-        if upload_input is None:
-            douyin_logger.warning("  [-] 弹窗里没有图片上传框")
-            return False
+        upload_input = page.locator("input[data-omp-cover-input='1']").first
         try:
             await upload_input.wait_for(state="attached", timeout=10000)
             await upload_input.set_input_files(str(image_path))
         except Exception as e:
             douyin_logger.warning(f"  [-] 封面文件塞不进上传框: {e}")
             return False
-        done = modal.get_by_role("button", name="完成").first
+        done = page.locator(
+            "div.dy-creator-content-modal-wrap, div.dy-creator-content-modal"
+        ).last.get_by_role("button", name="完成").first
         for _ in range(20):
             await asyncio.sleep(1.0)
             try:
@@ -657,47 +692,6 @@ class DouYinVideo(object):
             pass
         return False
 
-    async def _cover_warning(self, page) -> str:
-        """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""
-        try:
-            body = await page.locator("body").inner_text()
-        except Exception:
-            return ""
-        lines = [l.strip() for l in body.splitlines() if "封面" in l]
-        for line in lines:
-            if "缺失" in line or "检测通过" in line or "低质" in line:
-                return line[:40]
-        return " ".join(lines)[:40]
-
-    async def _reopen_cover_modal(self, page, attempts: int = 3):
-        """打开（或复用）封面弹窗。
-
-        注意必须判断“真的可见”：弹窗关掉后 DOM 里可能还留着隐藏的
-        ``dy-creator-content-modal-wrap``，只看 count>0 会拿到一个隐藏元素，
-        后面的点击全部 30 秒超时。
-        """
-        modal = page.locator("div.dy-creator-content-modal-wrap").last
-        for _ in range(attempts):
-            try:
-                if await modal.count() and await modal.is_visible():
-                    return modal
-            except Exception:
-                pass
-            try:
-                await page.evaluate(
-                    """() => {
-                      const els = [...document.querySelectorAll('div,span')]
-                          .filter(e => !e.children.length
-                                  && (e.innerText || '').trim() === '选择封面' && e.offsetParent);
-                      if (els.length) els[0].click();
-                    }"""
-                )
-                await modal.wait_for(state="visible", timeout=8000)
-                return modal
-            except Exception:
-                await asyncio.sleep(1.5)
-        return None
-
     async def _use_ai_cover(self, page) -> bool:
         """让平台用它 AI 生成的封面（自己传图失败时的兜底）。"""
         modal = page.locator("div.dy-creator-content-modal-wrap").last
@@ -733,58 +727,6 @@ class DouYinVideo(object):
                 return False
         return False
 
-    async def set_thumbnail(self, page: Page, thumbnail_path: str = "", horizontal_cover: str = ""):
-        """设置竖封面（3:4）；自己传图失败就退回平台 AI 推荐封面。
-
-        实测要点：
-        * 点“选择封面”打开 ``div.dy-creator-content-modal-wrap``，默认“设置竖封面”tab；
-        * 图片塞进 ``input.semi-upload-hidden-input`` 后，“完成”一开始是 disabled
-          （编辑器还在处理），要轮询到可用再点；
-        * 打不开弹窗时用 JS 直接点“选择封面”叶子节点（Playwright 的可点性检查被
-          浮层挡住会一直超时）；
-        * 判断设上没有看页面提示（``封面效果检测通过``），不看自己的日志。
-        旧实现的 ``semi-modal-content`` / ``extractFooter`` 选择器早已失效，
-        相当于从来没设上过封面。横封面不再强求（用户要求只要竖封面）。
-        """
-        if not thumbnail_path:
-            return
-        modal = await self._reopen_cover_modal(page)
-        if modal is None:
-            douyin_logger.warning("  [-] 打不开封面弹窗，跳过设置封面")
-            return
-        ok = False
-        if await self._upload_cover_in_modal(page, thumbnail_path):
-            ok = True
-            douyin_logger.info("  [-] 竖封面已设置")
-        else:
-            douyin_logger.warning("  [-] 自己传封面失败，改用 AI 推荐封面")
-            ok = await self._use_ai_cover(page)
-        try:
-            for _ in range(3):
-                visible_modal = page.locator("div.dy-creator-content-modal-wrap").last
-                if not (await visible_modal.count() and await visible_modal.is_visible()):
-                    break
-                await page.keyboard.press("Escape")
-                await asyncio.sleep(1.2)
-            douyin_logger.success(
-                f"  [-] 封面已处理（{'成功' if ok else '没设上'}；"
-                f"页面提示: {await self._cover_warning(page) or '无'}）"
-            )
-        except Exception:
-            pass
-
-    async def _cover_warning(self, page) -> str:
-        """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""
-        try:
-            body = await page.locator("body").inner_text()
-        except Exception:
-            return ""
-        lines = [l.strip() for l in body.splitlines() if "封面" in l]
-        for line in lines:
-            if "缺失" in line or "检测通过" in line or "低质" in line:
-                return line[:40]
-        return " ".join(lines)[:40]
-
     async def _reopen_cover_modal(self, page, attempts: int = 3):
         """打开（或复用）封面弹窗。
 
@@ -792,7 +734,9 @@ class DouYinVideo(object):
         ``dy-creator-content-modal-wrap``，只看 count>0 会拿到一个隐藏元素，
         后面的点击全部 30 秒超时。
         """
-        modal = page.locator("div.dy-creator-content-modal-wrap").last
+        modal = page.locator(
+            "div.dy-creator-content-modal-wrap, div.dy-creator-content-modal"
+        ).last
         for _ in range(attempts):
             try:
                 if await modal.count() and await modal.is_visible():
@@ -814,21 +758,31 @@ class DouYinVideo(object):
                 await asyncio.sleep(1.5)
         return None
 
+    async def _cover_preview_srcs(self, page) -> list:
+        """页面上“设置封面”预览图的地址，用来判断封面到底换没换。"""
+        try:
+            return await page.evaluate(
+                """() => [...document.querySelectorAll('[class*="coverControl"] img')]
+                        .map(i => i.getAttribute('src') || '')
+                        .filter(Boolean)"""
+            )
+        except Exception:
+            return []
+
     async def set_thumbnail(self, page: Page, thumbnail_path: str = "", horizontal_cover: str = ""):
         """设置竖/横封面（抖音会提示“横/竖双封面缺失”，两个都设曝光更好）。
 
         实测要点：
-        * 点“选择封面”打开 ``div.dy-creator-content-modal-wrap``，默认“设置竖封面”tab；
-        * 图片塞进 ``input.semi-upload-hidden-input`` 后，“完成”一开始是 disabled
-          （编辑器还在处理），要轮询到可用再点；
+        * 点“选择封面”打开封面弹窗，默认“设置竖封面”tab；
+        * 弹窗里换封面只能用“上传封面”那个 file input（见 ``_upload_cover_in_modal``）；
         * 点“完成”之后弹窗经常自己关掉，而页面上仍留着两个“选择封面”（竖/横各一个），
           直接用 JS 点它重新打开，再切到“设置横封面”传第二张 —— 用 Playwright
           的可点性检查在这里会一直超时（元素被遮挡/需要悬停）。
-        旧实现用的 ``semi-modal-content`` / ``extractFooter`` 选择器早已失效，
-        相当于从来没设上过封面。
+        不点“完成”时页面预览不会变，所以设完要对比预览图地址，别只看自己的日志。
         """
         if not thumbnail_path and not horizontal_cover:
             return
+        before = await self._cover_preview_srcs(page)
         modal = await self._reopen_cover_modal(page)
         if modal is None:
             douyin_logger.warning("  [-] 打不开封面弹窗，跳过设置封面")
@@ -857,14 +811,29 @@ class DouYinVideo(object):
 
         try:
             for _ in range(3):
-                visible_modal = page.locator("div.dy-creator-content-modal-wrap").last
+                visible_modal = page.locator(
+                    "div.dy-creator-content-modal-wrap, div.dy-creator-content-modal"
+                ).last
                 if not (await visible_modal.count() and await visible_modal.is_visible()):
                     break
                 await page.keyboard.press("Escape")
                 await asyncio.sleep(1.2)
-            douyin_logger.success(f"  [-] 封面已应用（页面提示: {await self._cover_warning(page) or '无'}）")
         except Exception:
             pass
+
+        after = await self._cover_preview_srcs(page)
+        changed = bool(before) and bool(after) and after != before
+        if thumbnail_path and before and after and not changed:
+            # 预览没变说明“完成”没把图应用上去，退到平台 AI 封面，别让作品挂黑封面
+            douyin_logger.warning("  [-] 封面预览没变，改用 AI 推荐封面")
+            if await self._reopen_cover_modal(page):
+                await self._use_ai_cover(page)
+            after = await self._cover_preview_srcs(page)
+            changed = bool(before) and bool(after) and after != before
+        douyin_logger.success(
+            f"  [-] 封面已处理（{'预览已更新' if changed else '预览未变化/无法确认'}；"
+            f"页面提示: {await self._cover_warning(page) or '无'}）"
+        )
 
     async def _cover_warning(self, page) -> str:
         """读“发文助手/封面”那块关于封面的提示，用来判断封面到底设上没有。"""

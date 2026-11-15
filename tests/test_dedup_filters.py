@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from Dedup.config import VideoConfig
-from Dedup.filters import VideoEffects
+from Dedup.filters import FADE_IN_FLOOR, VideoEffects
 from tests.helpers import _passing_video_config
 
 
@@ -76,13 +76,15 @@ def test_rotate_zero_angle_returns_same_frame(tmp_path):
     assert np.array_equal(VideoEffects.rotate_frame(frame, config), frame)
 
 
-def test_fade_in_first_frame_is_black(tmp_path):
+def test_fade_in_first_frame_not_black(tmp_path):
+    """首帧不能压成纯黑：平台默认截第 0 帧当封面，纯黑就是黑缩略图。"""
     config = _passing_video_config(tmp_path)
     config.fade_in_frames = 5
     config.fade_out_frames = 20
     frame = _frame(100)
     out = VideoEffects.apply_fade_effect(frame, config, 0, 100)
-    assert out.max() == 0  # 第 0 帧 alpha=0，全黑
+    assert out.min() > 0
+    assert out.max() == round(100 * FADE_IN_FLOOR)
 
 
 def test_fade_out_last_frame_is_almost_black(tmp_path):
