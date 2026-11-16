@@ -85,6 +85,8 @@ def _make_fake_cv2():
     cv2.CAP_PROP_FPS = 5
     cv2.INTER_AREA = 3
     cv2.INTER_LINEAR = 1
+    cv2.INTER_CUBIC = 2
+    cv2.BORDER_REFLECT_101 = 4
 
     def cvtColor(frame, code):  # BGR<->RGB 只换通道，其余转换原样返回
         if code in (cv2.COLOR_BGR2RGB, cv2.COLOR_RGB2BGR):
@@ -104,11 +106,14 @@ def _make_fake_cv2():
     def getRotationMatrix2D(center, angle, scale):
         return np.eye(2, 3)
 
-    def warpAffine(frame, matrix, dsize):
+    def warpAffine(frame, matrix, dsize, flags=None, borderMode=None, borderValue=None):
         return frame.copy()
 
     def convertScaleAbs(frame, alpha=1.0, beta=0):
         return np.clip(frame.astype(float) * alpha + beta, 0, 255).astype(np.uint8)
+
+    def LUT(frame, lut):
+        return np.asarray(lut, dtype=np.uint8)[frame]
 
     def split(frame):
         return [frame[:, :, i].copy() for i in range(frame.shape[2])]
@@ -163,6 +168,7 @@ def _make_fake_cv2():
     cv2.getRotationMatrix2D = getRotationMatrix2D
     cv2.warpAffine = warpAffine
     cv2.convertScaleAbs = convertScaleAbs
+    cv2.LUT = LUT
     cv2.split = split
     cv2.merge = merge
     cv2.addWeighted = addWeighted

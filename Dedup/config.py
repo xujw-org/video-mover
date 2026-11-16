@@ -45,7 +45,7 @@ class VideoConfig:
         # 水印参数
         self.include_watermark: bool = True                         # 是否添加水印
         self.watermark_opacity: float = 0.06                        # 水印透明度，范围0-1，文字0.10，图片视频0.05
-        self.watermark_direction: str = 'random'                    # 水印移动方向
+        self.watermark_direction: str = 'bottom_left'               # 水印位置：fixed corner / 8 向移动 / random
         self.watermark_color: str = 'white'                         # 水印颜色，支持颜色名称或 HEX 码。
         self.watermark_text: str = 'YANQU'                          # 水印文本内容
         self.watermark_type: str = 'image'                          # 水印类型，根据类型设置对应路径，text、image、video。
@@ -85,7 +85,10 @@ class VideoConfig:
         self.fade_out_frames: int = 20                      # 淡出效果持续的帧数，建议 10-30 帧。
 
         # 画中画
-        self.include_hzh: bool = True        # 是否启用画中画
+        # 默认关闭（2026-11-16 画质修复）：hzh_scale 随机 0.8–1.0 时画中画会
+        # 覆盖整幅画面，再按 5–15% 透明度混合，等于给全片叠一层半透明鬼影，
+        # 是“看起来发虚/重影”的主要来源之一，对指纹的贡献却很小。
+        self.include_hzh: bool = False
         self.hzh_opacity: float = 0.1        # 画中画透明度
         self.hzh_scale: float = 1.0          # 画中画大小因子
         self.hzh_video_file: str = 'assets/hzh.mp4'  # 画中画视频文件路径
@@ -124,13 +127,23 @@ class VideoConfig:
 
         # 颜色偏移
         self.enable_color_shift: bool = True                # 是否启用颜色偏移
-        self.color_shift_range: int = 3                     # 颜色偏移区间，3代表[-3,3]，该值越大颜色差距越明显
+        self.color_shift_range: int = 3                     # 颜色偏移区间，3 代表 [-3,3]
+        # 每个视频固定的偏移量（B +v / G -v）。原实现每帧重新随机，整片
+        # 颜色来回抖，编码器把它当噪声吃掉，输出发糊（2026-11-16）。
+        self.color_shift_value: int = 3
 
         # 高级效果
-        self.scramble_frequency: float = 0.0                # 频域扰乱参数，0.0表示禁用，范围0.0-1.0，开启后处理时间较长。
+        self.scramble_frequency: float = 0.0                # 频域扰乱参数，0.0 表示禁用
         self.enable_texture_noise: bool = False             # 是否启用纹理噪声
-        self.texture_noise_strength: float = 0.5            # 纹理噪声强度，范围 0-1，默认 0.5
-        self.enable_blur_edge: bool = True                  # 是否启用边缘模糊
+        self.texture_noise_strength: float = 0.5            # 纹理噪声强度，范围 0-1
+        # 边缘模糊默认关闭：它把 Canny 边缘再高斯模糊后按 10% 叠加，等于
+        # 给整片蒙一层灰雾——去重收益很小，画质代价很大。
+        self.enable_blur_edge: bool = False
+
+        # 输出编码质量（2026-11-16）
+        # libx264 CRF：越小越清晰、文件越大。23 对“已二次压缩 + 逐帧
+        # 扰动”的素材太狠，块效应肉眼可见；18 接近视觉无损。
+        self.output_crf: int = 18
 
     # 每视频随机参数的取值范围（2026-11-12，针对“固定参数易判重”）。
     # 全部落在 validate() 允许的范围内，且不超出各参数注释里的建议区间，
@@ -149,7 +162,10 @@ class VideoConfig:
         config = cls()
         config.random_seed = seed
         config.rotation_angle = rng.randint(-6, 6)
-        config.crop_percentage = round(rng.uniform(0.05, 0.20), 3)
+        # 裁剪收窄到 4–12%（原 5–20%）：裁剪 20% 时每边去掉 1/5，画面要放大
+        # 1.67×（再叠 1.02–1.08 的 zoom 就是 1.7–1.8×），源片细节被拉没了。
+        # 4–12% 仍然改变构图与逐像素指纹，但放大倍率控制在 1.3× 以内。
+        config.crop_percentage = round(rng.uniform(0.04, 0.12), 3)
         config.saturation = round(rng.uniform(0.90, 1.15), 3)
         config.brightness = round(rng.uniform(-0.10, 0.15), 3)
         config.contrast = round(rng.uniform(0.90, 1.15), 3)
@@ -164,11 +180,16 @@ class VideoConfig:
         config.fade_in_frames = rng.randint(5, 15)
         config.fade_out_frames = rng.randint(10, 30)
         config.color_shift_range = rng.randint(2, 5)
-        config.enable_texture_noise = rng.random() < 0.30
-        config.texture_noise_strength = round(rng.uniform(0.3, 0.7), 2)
-        # 20% 概率开频域扰乱：0.05–0.20 的轻扰动，处理时间明显变长。
+        # 色偏整片固定一个值：原实现每帧重新随机，画面颜色来回抖，
+        # 编码器只能靠多花码率去追，解出来就是发糊 + 噪点。
+        shift = rng.randint(-config.color_shift_range, config.color_shift_range)
+        config.color_shift_value = shift or 1
+        # 纹理噪声是逐像素、逐帧的高频白噪声：肉眼几乎看不到颗粒感，
+        # 却让 x264 每帧都多花码率，默认不再随机开启（功能仍保留）。
+        config.enable_texture_noise = False
+        # 10% 概率开频域扰乱：0.05–0.15 的轻扰动，处理时间明显变长。
         config.scramble_frequency = (
-            round(rng.uniform(0.05, 0.20), 2) if rng.random() < 0.20 else 0.0
+            round(rng.uniform(0.05, 0.15), 2) if rng.random() < 0.10 else 0.0
         )
         config.hzh_opacity = round(rng.uniform(0.05, 0.15), 3)
         config.hzh_scale = round(rng.uniform(0.8, 1.0), 2)
@@ -360,6 +381,9 @@ class VideoConfig:
             raise ValueError("enable_color_shift 必须是布尔值")
         if not isinstance(self.color_shift_range, int) or self.color_shift_range < 0:
             raise ValueError("color_shift_range 必须是非负整数")
+        if (not isinstance(self.color_shift_value, int)
+                or abs(self.color_shift_value) > self.color_shift_range):
+            raise ValueError("color_shift_value 必须是整数，且绝对值不超过 color_shift_range")
 
         # 高级效果
         if not 0 <= self.scramble_frequency <= 1:
@@ -370,6 +394,10 @@ class VideoConfig:
             raise ValueError("texture_noise_strength 必须在 0 到 1 之间")
         if not isinstance(self.enable_blur_edge, bool):
             raise ValueError("enable_blur_edge 必须是布尔值")
+
+        # 输出编码质量
+        if not isinstance(self.output_crf, int) or not 0 <= self.output_crf <= 51:
+            raise ValueError("output_crf 必须是 0 到 51 之间的整数")
 
         # 验证文件路径
         paths_to_check = [

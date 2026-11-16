@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from Dedup.ffmpeg_utils import FFmpegHandler
+from tests.helpers import _passing_video_config
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +127,7 @@ def test_write_frames_encodes_yuv420p_and_shortest(monkeypatch, tmp_path):
     monkeypatch.setattr("Dedup.pipeline.ffmpeg", _FakeFfmpeg)
 
     handler = VideoHandler.__new__(VideoHandler)  # 跳过 __init__ 的配置校验
+    handler.config = _passing_video_config(tmp_path)
     frames = [np.zeros((4, 4, 3), dtype=np.uint8) for _ in range(3)]
     handler._write_frames(iter(frames), str(tmp_path / "out.mp4"), 4, 4, 30.0, None)
 

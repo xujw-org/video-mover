@@ -517,9 +517,24 @@ class DouYinVideo(object):
                     if (rows.length > bestRows.length) { best = drop; bestRows = rows; }
                   }
                   if (!bestRows.length) return '';
-                  let pick = bestRows.find(e => (e.innerText || '').trim().startsWith('#' + tag));
-                  if (!pick && skip > 0) pick = bestRows[skip] || bestRows[skip - 1];
-                  if (!pick && skip === 0) pick = bestRows[0];
+                  // 行首是话题、第二行是播放量（如 “#xxx万”）。
+                  const headOf = e => ((e.innerText || '').trim()
+                                        .split(String.fromCharCode(10))[0] || '').trim();
+                  // skip=0：优先同名官方话题，否则第一行；
+                  // skip>0：命中“热门标签”，排除“同名”行后按序号取。
+                  // 注意必须用“完全相同”而不是 startsWith：像
+                  // #今天是太阳雨定档1106 也以 #今天是太阳雨 开头，用前缀过滤会
+                  // 把所有相关热门话题一起滤掉，热门标签永远加不上。
+                  let pool = bestRows;
+                  if (skip > 0) {
+                    pool = bestRows.filter(e => headOf(e) !== '#' + tag);
+                  }
+                  let pick;
+                  if (skip === 0) {
+                    pick = pool.find(e => headOf(e) === '#' + tag) || pool[0];
+                  } else {
+                    pick = pool[skip - 1];
+                  }
                   if (!pick) return '';
                   pick.click();
                   const parts = (pick.innerText || '').split(String.fromCharCode(10))

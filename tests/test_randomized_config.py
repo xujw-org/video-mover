@@ -30,6 +30,7 @@ RANDOMIZED_FIELDS = [
     "fade_in_frames",
     "fade_out_frames",
     "color_shift_range",
+    "color_shift_value",
     "enable_texture_noise",
     "texture_noise_strength",
     "scramble_frequency",
@@ -90,6 +91,10 @@ def test_randomized_values_stay_in_valid_ranges():
         assert 0 <= config.background_music_volume <= 1
         assert 0 <= config.scramble_frequency <= 1
         assert 0 <= config.texture_noise_strength <= 1
+        assert abs(config.color_shift_value) <= config.color_shift_range
+        # 画质优先：高频噪声与边缘雾化不再按概率开启（2026-11-16）。
+        assert config.enable_texture_noise is False
+        assert config.enable_blur_edge is False
         assert 0 < config.hzh_scale <= 1
         assert 0 <= config.hzh_opacity <= 1
         assert 0 <= config.top_blur_percentage <= 100

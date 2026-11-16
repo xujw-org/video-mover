@@ -115,7 +115,7 @@ def test_single_frame_chain_order_all_enabled(tmp_path, monkeypatch):
             return args[0]
         return _fake
 
-    for name in ("rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+    for name in ("apply_geometry", "adjust_sbc", "apply_hue_shift",
                  "add_watermark", "add_subtitles",
                  "add_titles", "add_hzh_effect", "color_shift", "blur_background",
                  "scramble_phase", "add_texture_noise", "apply_edge_blur",
@@ -124,7 +124,7 @@ def test_single_frame_chain_order_all_enabled(tmp_path, monkeypatch):
 
     handler._process_single_frame(_frame(100), 10, config, 30.0, 100, 48, 64)
     assert calls == [
-        "rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+        "apply_geometry", "adjust_sbc", "apply_hue_shift",
         "add_watermark", "add_subtitles", "add_titles",
         "add_hzh_effect", "color_shift", "blur_background", "scramble_phase",
         "add_texture_noise", "apply_edge_blur", "apply_gaussian_blur", "apply_fade_effect",
@@ -142,7 +142,7 @@ def test_single_frame_chain_order_all_disabled(tmp_path, monkeypatch):
             return args[0]
         return _fake
 
-    for name in ("rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+    for name in ("apply_geometry", "adjust_sbc", "apply_hue_shift",
                  "add_watermark", "add_subtitles",
                  "add_titles", "add_hzh_effect", "color_shift", "blur_background",
                  "scramble_phase", "add_texture_noise", "apply_edge_blur",
@@ -150,10 +150,10 @@ def test_single_frame_chain_order_all_disabled(tmp_path, monkeypatch):
         monkeypatch.setattr(VideoEffects, name, staticmethod(recorder(name)))
 
     handler._process_single_frame(_frame(100), 10, config, 30.0, 100, 48, 64)
-    # 全部开关关闭时，只剩无条件执行的 12 步（zoom / hue 为 1.0 / 0 时原样返回，
-    # 但仍会调用）。
+    # 全部开关关闭时，只剩无条件执行的 11 步（geometry / hue 等可能原样
+    # 返回，但仍会调用）。
     assert calls == [
-        "rotate_frame", "apply_zoom", "adjust_sbc", "apply_hue_shift",
+        "apply_geometry", "adjust_sbc", "apply_hue_shift",
         "add_hzh_effect", "color_shift", "blur_background",
         "scramble_phase", "add_texture_noise", "apply_edge_blur",
         "apply_gaussian_blur", "apply_fade_effect",
@@ -185,7 +185,30 @@ def test_write_frames_uses_libx264_aac(tmp_path, monkeypatch):
     assert kwargs.get("vcodec") == "libx264"
     assert kwargs.get("acodec") == "aac"
     assert kwargs.get("preset") == "fast"
-    assert kwargs.get("crf") == 23
+    # 2026-11-16：crf 从写死的 23 变为配置项，默认 18（二次压缩下 23 会糊）。
+    assert kwargs.get("crf") == 18
+
+
+def test_build_watermark_derives_alpha_from_luminance_for_opaque_png():
+    """没有透明通道的新水印不能整块混上去：用亮度抠掉深色背景。"""
+    from PIL import Image
+
+    arr = np.zeros((4, 4, 3), np.uint8)
+    arr[:, 2:] = 255
+    rgb, alpha = VideoHandler._build_watermark(
+        Image.fromarray(arr).convert("RGBA"), 0.1)
+    assert rgb.shape == (4, 4, 3)
+    assert np.allclose(alpha[:, :2], 0.0)
+    assert np.allclose(alpha[:, 2:], 0.1)
+
+
+def test_build_watermark_keeps_existing_alpha():
+    from PIL import Image
+
+    arr = np.zeros((2, 2, 4), np.uint8)
+    arr[:, :, 3] = 128
+    _, alpha = VideoHandler._build_watermark(Image.fromarray(arr, "RGBA"), 0.5)
+    assert np.allclose(alpha, 128 / 255 * 0.5)
 
 
 def _end_to_end(tmp_path, *, frame_swap):

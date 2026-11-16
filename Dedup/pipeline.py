@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generator, List, Tuple
@@ -79,8 +80,30 @@ class VideoHandler:
         self.watermark_img = None
         self.wm_rgb = None
         self.wm_alpha = None
+        self.wm_random_pos = None   # direction='random' 时整片固定的水印坐标
+        # 帧是线程池并行处理的，缓存坐标必须加锁，否则首批多帧可能各抽一个
+        # 位置（等于开头一两秒水印仍在跳）。
+        self.wm_lock = threading.Lock()
         if config.watermark_type == 'image' and config.watermark_image_path:
             self.watermark_img = Image.open(config.watermark_image_path).convert("RGBA")
+
+    @staticmethod
+    def _build_watermark(img, opacity: float):
+        """把 PIL 水印图转成 (BGR 图, alpha 蒙版)。
+
+        有透明通道时直接用图片自带的 alpha；没有透明通道（RGB/整张不透明）时
+        用亮度当 alpha：深色背景透明、亮色 logo 保留。否则整块方形背景会以
+        低透明度糊在画面上，看起来像一块脏斑。
+        """
+        arr = np.asarray(img)
+        alpha = arr[:, :, 3].astype(np.float32) / 255.0
+        if float(alpha.min()) > 0.999:
+            lum = (arr[:, :, 0] * 0.299 + arr[:, :, 1] * 0.587
+                   + arr[:, :, 2] * 0.114).astype(np.float32)
+            # 背景近黑（<40）透明，亮色 logo（>110）完全不透明，中间线性过渡
+            alpha = np.clip((lum - 40.0) / 70.0, 0.0, 1.0)
+        return (cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR),
+                alpha * opacity)
 
     def process_video(self, input_path: str, output_path: str) -> None:
         """
@@ -119,9 +142,8 @@ class VideoHandler:
                 wm_width = width // 5
                 wm_height = int(wm_width * self.watermark_img.height / self.watermark_img.width)
                 self.watermark_img = self.watermark_img.resize((wm_width, wm_height), Image.Resampling.LANCZOS)
-                wm_array = np.array(self.watermark_img)
-                self.wm_rgb = cv2.cvtColor(wm_array[:, :, :3], cv2.COLOR_RGB2BGR)
-                self.wm_alpha = wm_array[:, :, 3] / 255.0 * self.config.watermark_opacity
+                self.wm_rgb, self.wm_alpha = self._build_watermark(
+                    self.watermark_img, self.config.watermark_opacity)
             # 获取视频时长并根据 subtitles_duration 决定是否加载字幕
             probe = ffmpeg.probe(input_path)
             duration = float(probe['format']['duration'])
@@ -354,21 +376,11 @@ class VideoHandler:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         if config.flip_horizontal:
             frame = cv2.flip(frame, 1)
-        frame = VideoEffects.rotate_frame(frame, config)
-        h, w = frame.shape[:2]
-        
-        # 应用按比例裁剪
-        crop_h = int(orig_height * config.crop_percentage)
-        crop_w = int(orig_width * config.crop_percentage)
-        top, bottom, left, right = crop_h, crop_h, crop_w, crop_w
-        if top + bottom < h and left + right < w:
-            frame = frame[top:h - bottom, left:w - right]
-        
-        # 缩放回原始尺寸
-        if frame.shape[0] != orig_height or frame.shape[1] != orig_width:
-            frame = cv2.resize(frame, (orig_width, orig_height), interpolation=cv2.INTER_AREA)
-        
-        frame = VideoEffects.apply_zoom(frame, config)
+        # 旋转 / 裁剪 / 缩放 / zoom 合成一次重采样（原链路最多采 3 次，
+        # 裁剪比例最大时画面要放大 1.6× 以上，叠三次插值就是“发软”）。
+        frame = VideoEffects.apply_geometry(
+            frame, config, orig_width, orig_height)
+
         frame = VideoEffects.adjust_sbc(frame, config)
         frame = VideoEffects.apply_hue_shift(frame, config)
         if config.include_watermark:
@@ -410,7 +422,9 @@ class VideoHandler:
             # 必须显式 yuv420p：管道里送的是 bgr24，x264 会默认选 yuv444p
             #（High 4:4:4 Predictive），手机/抖音/多数播放器解不了，表现为
             # “前几秒正常后面一帧卡住”，文件也大到离谱（同片 12.8MB -> 2MB）。
-            pix_fmt='yuv420p', crf=23,
+            # crf 走配置（默认 18）：原 23 面对“已二次压缩 + 逐帧扰动”的素材
+            # 会出块效应，是“糊 + 噪点”的主要来源之一。
+            pix_fmt='yuv420p', crf=self.config.output_crf,
             # 音频（变调/变速 + BGM 混音后）可能比视频流长一点，不加 -shortest 时
             # 容器时长跟音频走，播放器会把最后一帧定住几百毫秒（看着像“卡住”）。
             shortest=None,

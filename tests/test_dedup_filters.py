@@ -2,6 +2,8 @@
 """VideoEffects：纯逻辑（颜色、水印位置）与带开关的帧特效。"""
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
 
@@ -25,7 +27,8 @@ def test_parse_color_unknown_defaults_to_white():
 @pytest.mark.parametrize(
     "direction",
     ["left_to_right", "right_to_left", "top_to_bottom", "bottom_to_top",
-     "lt_to_rb", "rt_to_lb", "lb_to_rt", "rb_to_lt"],
+     "lt_to_rb", "rt_to_lb", "lb_to_rt", "rb_to_lt",
+     "top_left", "top_right", "bottom_left", "bottom_right"],
 )
 def test_watermark_position_directions_stay_inside(direction):
     # 100x80 的视频、10x5 的水印，起点 / 终点都要落在画面内。
@@ -33,6 +36,14 @@ def test_watermark_position_directions_stay_inside(direction):
         x, y = VideoEffects.get_watermark_position(direction, frame_idx, 100, 100, 80, 10, 5)
         assert 0 <= x <= 100 - 10
         assert 0 <= y <= 80 - 5
+
+
+def test_watermark_bottom_left_is_fixed_corner():
+    # 720x1280 画面、144x144 水印：边距 = 短边 3% ≈ 21px，整片不动。
+    for frame_idx in (0, 150, 299):
+        x, y = VideoEffects.get_watermark_position(
+            "bottom_left", frame_idx, 300, 720, 1280, 144, 144)
+        assert (x, y) == (21, 1280 - 144 - 21)
 
 
 def test_watermark_position_random_stays_inside():
@@ -47,6 +58,38 @@ def test_watermark_position_unknown_direction_is_centered():
     assert (x, y) == ((100 - 10) // 2, (80 - 5) // 2)
 
 
+def test_random_watermark_position_is_fixed_per_video(tmp_path, monkeypatch):
+    """direction='random' 时坐标整片只抽一次，不能每帧乱跳。"""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    config = _passing_video_config(tmp_path)
+    config.watermark_type = 'image'
+    config.watermark_direction = 'random'
+    wm = Image.new('RGBA', (10, 5), (255, 255, 255, 255))
+    handler = SimpleNamespace(
+        watermark_img=wm,
+        wm_rgb=np.full((5, 10, 3), 200, np.uint8),
+        wm_alpha=np.full((5, 10), 0.1, np.float32),
+        wm_random_pos=None,
+        wm_lock=threading.Lock(),
+    )
+    calls = []
+
+    def fake_pos(*args):
+        calls.append(args)
+        return (10, 10)
+
+    monkeypatch.setattr(VideoEffects, "get_watermark_position",
+                        staticmethod(fake_pos))
+    frame = np.full((48, 64, 3), 100, np.uint8)
+    VideoEffects.add_watermark(frame, config, 0, 100, handler)
+    VideoEffects.add_watermark(frame, config, 1, 100, handler)
+    assert handler.wm_random_pos == (10, 10)
+    assert len(calls) == 1  # 第二帧直接复用缓存
+
+
 def _frame(value=100, shape=(48, 64, 3)):
     return np.full(shape, value, dtype=np.uint8)
 
@@ -59,7 +102,6 @@ def test_disabled_effects_return_frame_unchanged(tmp_path):
     config.enable_blur_edge = False
     config.blur_background_enabled = False
     frame = _frame()
-    assert np.array_equal(VideoEffects.rotate_frame(frame, config), frame)
     assert np.array_equal(VideoEffects.adjust_sbc(frame, config), frame)
     assert np.array_equal(VideoEffects.color_shift(frame, config), frame)
     assert np.array_equal(VideoEffects.blur_background(frame, config), frame)
@@ -69,11 +111,15 @@ def test_disabled_effects_return_frame_unchanged(tmp_path):
     assert np.array_equal(VideoEffects.apply_gaussian_blur(frame, config, 3), frame)
 
 
-def test_rotate_zero_angle_returns_same_frame(tmp_path):
+def test_apply_geometry_identity_returns_same_frame(tmp_path):
+    """旋转为 0、不裁剪、zoom=1、输出尺寸不变时不做重采样（免一次插值）。"""
     config = _passing_video_config(tmp_path)
     config.rotation_angle = 0
+    config.crop_percentage = 0.0
+    config.zoom_factor = 1.0
     frame = _frame()
-    assert np.array_equal(VideoEffects.rotate_frame(frame, config), frame)
+    assert np.array_equal(
+        VideoEffects.apply_geometry(frame, config, 64, 48), frame)
 
 
 def test_fade_in_first_frame_not_black(tmp_path):
@@ -106,20 +152,20 @@ def test_fade_middle_frame_unchanged(tmp_path):
     assert np.array_equal(out, frame)
 
 
-def test_color_shift_moves_blue_up_and_green_down(tmp_path):
-    import random
-
+def test_color_shift_uses_fixed_per_video_value(tmp_path):
+    """色偏整片固定：每帧重新随机会造成颜色闪烁（编码后就是噪点）。"""
     config = _passing_video_config(tmp_path)
     config.enable_color_shift = True
     config.color_shift_range = 3
-    random.seed(7)
+    config.color_shift_value = 2
     frame = _frame(100)
     out = VideoEffects.color_shift(frame, config)
     assert out.shape == frame.shape and out.dtype == np.uint8
-    assert out[0, 0, 2] == 100  # R 通道不动
-    shift = int(out[0, 0, 0]) - 100
-    assert -3 <= shift <= 3
-    assert int(out[0, 0, 1]) == 100 - shift  # G 通道反向移动同样幅度
+    assert int(out[0, 0, 0]) == 102  # B +2
+    assert int(out[0, 0, 1]) == 98   # G -2
+    assert int(out[0, 0, 2]) == 100  # R 通道不动
+    # 同一配置重复调用结果一致（不再依赖全局 random 流）。
+    assert np.array_equal(VideoEffects.color_shift(frame, config), out)
 
 
 def test_hue_shift_zero_returns_same_frame(tmp_path):
@@ -139,24 +185,6 @@ def test_hue_shift_moves_hue_channel(tmp_path):
     # 10° 对应 OpenCV 的 5 个单位，100 -> 105，其余通道不动。
     assert int(out[0, 0, 0]) == 105
     assert int(out[0, 0, 1]) == 100
-
-
-def test_zoom_one_returns_same_frame(tmp_path):
-    config = _passing_video_config(tmp_path)
-    config.zoom_factor = 1.0
-    frame = _frame()
-    assert np.array_equal(VideoEffects.apply_zoom(frame, config), frame)
-
-
-def test_zoom_enlarges_then_crops_back_to_same_shape(tmp_path):
-    config = _passing_video_config(tmp_path)
-    config.zoom_factor = 1.08
-    # 横向渐变帧：放大再居中裁回后，内容必然变化，尺寸保持不变。
-    base = np.tile(np.arange(64, dtype=np.uint8), (48, 1))
-    frame = np.stack([base, base, base], axis=-1)
-    out = VideoEffects.apply_zoom(frame, config)
-    assert out.shape == frame.shape
-    assert not np.array_equal(out, frame)
 
 
 def test_gaussian_blur_applies_only_on_interval_frames(tmp_path):

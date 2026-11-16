@@ -41,6 +41,35 @@ class VideoEffects:
     视频特效类，包含水印、字幕、模糊等效果的实现。
     """
     @staticmethod
+    def _watermark_position(config: VideoConfig, handler, frame_idx: int,
+                            total_frames: int, w: int, h: int,
+                            wm_w: int, wm_h: int) -> Tuple[int, int]:
+        """水印坐标。`random` 方向整片只抽一次。
+
+        原实现对 `random` 每帧调一次 `random.randint`，水印（尤其是图片水印）
+        每帧换一个位置，看起来就是“有个东西在画面里乱跳”。改成每个视频缓存
+        一个位置：去重作用不变（水印仍然覆盖画面、改变像素），观感正常。
+        """
+        if config.watermark_direction != 'random':
+            return VideoEffects.get_watermark_position(
+                config.watermark_direction, frame_idx, total_frames,
+                w, h, wm_w, wm_h)
+        if handler is None:
+            return VideoEffects.get_watermark_position(
+                'random', frame_idx, total_frames, w, h, wm_w, wm_h)
+        lock = getattr(handler, 'wm_lock', None)
+        if lock is None:
+            if handler.wm_random_pos is None:
+                handler.wm_random_pos = VideoEffects.get_watermark_position(
+                    'random', frame_idx, total_frames, w, h, wm_w, wm_h)
+            return handler.wm_random_pos
+        with lock:
+            if handler.wm_random_pos is None:
+                handler.wm_random_pos = VideoEffects.get_watermark_position(
+                    'random', frame_idx, total_frames, w, h, wm_w, wm_h)
+            return handler.wm_random_pos
+
+    @staticmethod
     def add_watermark(frame: np.ndarray, config: VideoConfig, frame_idx: int, total_frames: int, handler: 'VideoHandler' = None) -> np.ndarray:
         """
         在视频帧上添加水印（支持文本、图片和视频水印）。
@@ -64,7 +93,9 @@ class VideoEffects:
             draw = ImageDraw.Draw(pil_img)
             text_bbox = draw.textbbox((0, 0), config.watermark_text, font=font)
             text_width, text_height = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
-            x, y = VideoEffects.get_watermark_position(config.watermark_direction, frame_idx, total_frames, w, h, text_width, text_height)
+            x, y = VideoEffects._watermark_position(
+                config, handler, frame_idx, total_frames, w, h,
+                text_width, text_height)
             x, y = max(0, min(x, w - text_width)), max(0, min(y, h - text_height))
             color = VideoEffects.parse_color(config.watermark_color)
             border_size = config.text_border_size
@@ -91,7 +122,9 @@ class VideoEffects:
         
         elif config.watermark_type == 'image' and config.watermark_image_path and handler and handler.wm_rgb is not None:
             wm_width, wm_height = handler.watermark_img.size
-            x, y = VideoEffects.get_watermark_position(config.watermark_direction, frame_idx, total_frames, w, h, wm_width, wm_height)
+            x, y = VideoEffects._watermark_position(
+                config, handler, frame_idx, total_frames, w, h,
+                wm_width, wm_height)
             if x + wm_width > w or y + wm_height > h or x < 0 or y < 0:
                 return frame
             roi = frame[y:y+wm_height, x:x+wm_width]
@@ -147,6 +180,9 @@ class VideoEffects:
                 - 'rt_to_lb': 右上到左下对角线移动
                 - 'lb_to_rt': 左下到右上对角线移动
                 - 'rb_to_lt': 右下到左上对角线移动
+                - 'top_left' / 'top_right' / 'bottom_left' / 'bottom_right':
+                  固定贴在对应角落（整片不动）
+                - 'random': 整片随机一个固定位置
             frame_index: 当前帧序号 (从0开始)
             total_frames: 视频总帧数
             video_width: 视频宽度 (像素)
@@ -163,6 +199,13 @@ class VideoEffects:
             # 随机生成 x 和 y 坐标，确保在安全边距内
             x = random.randint(MARGIN, video_width - watermark_width - MARGIN)
             y = random.randint(MARGIN, video_height - watermark_height - MARGIN)
+        elif direction in ('top_left', 'top_right', 'bottom_left', 'bottom_right'):
+            # 固定角落：整片不动。边距按短边 3% 算（720p 约 21px）。
+            margin = max(MARGIN, int(min(video_width, video_height) * 0.03))
+            x = margin if direction.endswith('left') else video_width - watermark_width - margin
+            y = margin if direction.startswith('top') else video_height - watermark_height - margin
+            x = max(0, min(x, video_width - watermark_width))
+            y = max(0, min(y, video_height - watermark_height))
         else:
             progress = frame_index / total_frames
             
@@ -367,23 +410,43 @@ class VideoEffects:
         return frame
 
     @staticmethod
-    def rotate_frame(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
-        """
-        旋转视频帧。
+    def apply_geometry(frame: np.ndarray, config: VideoConfig,
+                       out_width: int, out_height: int) -> np.ndarray:
+        """旋转 + 裁剪 + 缩放 + zoom，合并成一次重采样（2026-11-16）。
 
-        参数:
-            frame: 当前视频帧
-            config: 视频处理配置对象
+        原链路是 rotate_frame → 裁剪 → resize → apply_zoom，每帧最多做 3 次
+        插值；裁剪 4–12% 加 zoom 1.02–1.08 相当于把画面放大 1.1–1.4×，叠三次
+        插值就是肉眼可见的“软”。这里把四步合成一个仿射矩阵：以画面中心旋转
+        angle，再按 scale = zoom × 输出宽 / 裁剪后宽 缩放，直接 warpAffine 到
+        输出尺寸。
 
-        返回:
-            np.ndarray: 旋转后的帧
+        数学上等价：裁剪和 zoom 都是“取中心更小的一块放大”，中心对称裁剪下
+        与绕中心旋转可交换。所以只采一次样，黑角用镜像补边。
         """
-        if config.rotation_angle != 0:
-            h, w = frame.shape[:2]
-            center = (w // 2, h // 2)
-            matrix = cv2.getRotationMatrix2D(center, config.rotation_angle, 1.0)
-            frame = cv2.warpAffine(frame, matrix, (w, h))
-        return frame
+        h0, w0 = frame.shape[:2]
+        crop = min(max(config.crop_percentage, 0.0), 0.499)
+        zoom = max(config.zoom_factor, 1.0)
+        w1 = w0 * (1.0 - 2.0 * crop)
+        h1 = h0 * (1.0 - 2.0 * crop)
+        if w1 < 2 or h1 < 2:
+            return cv2.resize(frame, (out_width, out_height),
+                              interpolation=cv2.INTER_LINEAR)
+        scale = zoom * out_width / w1
+        cx, cy = w0 / 2.0, h0 / 2.0
+        if (config.rotation_angle == 0 and abs(scale - 1.0) < 1e-6
+                and out_width == w0 and out_height == h0):
+            return frame
+        matrix = cv2.getRotationMatrix2D((cx, cy), config.rotation_angle, scale)
+        # 输出尺寸可能与输入不同，把中心平移到输出画布中心。
+        matrix[0, 2] += out_width / 2.0 - cx
+        matrix[1, 2] += out_height / 2.0 - cy
+        # 放大倍率 >1.15 时用 CUBIC：单次立方插值比双线性明显更锐，
+        # 且现在只有这一次采样，耗时可接受。
+        interpolation = cv2.INTER_CUBIC if scale > 1.15 else cv2.INTER_LINEAR
+        return cv2.warpAffine(
+            frame, matrix, (out_width, out_height),
+            flags=interpolation, borderMode=cv2.BORDER_REFLECT_101,
+        )
 
     @staticmethod
     def adjust_sbc(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
@@ -398,7 +461,16 @@ class VideoEffects:
             np.ndarray: 调整后的帧
         """
         if config.enable_sbc:
-            frame = cv2.convertScaleAbs(frame, alpha=config.contrast, beta=config.brightness * 255)
+            # convertScaleAbs 会做 |alpha*x + beta|：亮度设为负值时暗部反而被
+            # 抬亮，等于给阴影加噪。这里用 256 项 LUT 做饱和截断，结果正确、
+            # 一次查表完成（不做逐帧浮点整幅运算）。
+            alpha = config.contrast
+            beta = config.brightness * 255
+            if alpha != 1.0 or beta != 0.0:
+                lut = np.clip(
+                    np.arange(256, dtype=np.float32) * alpha + beta, 0, 255
+                ).astype(np.uint8)
+                frame = cv2.LUT(frame, lut)
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
             hsv[:, :, 1] = np.clip(hsv[:, :, 1] * config.saturation, 0, 255)
             frame = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
@@ -428,33 +500,6 @@ class VideoEffects:
         hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
         hsv[:, :, 0] = (hsv[:, :, 0].astype(np.int16) + delta) % 180
         return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-
-    @staticmethod
-    def apply_zoom(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
-        """
-        对视频帧应用轻微缩放（第 2 步新增）。
-
-        先把帧放大 zoom_factor 倍，再居中裁回原尺寸：画面内容整体
-        外扩一圈，每像素的位置都变了，但构图几乎看不出差别。
-        zoom_factor <= 1.0 时原样返回。
-
-        参数:
-            frame: 当前视频帧
-            config: 视频处理配置对象
-
-        返回:
-            np.ndarray: 应用缩放后的帧（尺寸与输入相同）
-        """
-        if not config.zoom_factor or config.zoom_factor <= 1.0:
-            return frame
-        h, w = frame.shape[:2]
-        new_h, new_w = int(h * config.zoom_factor), int(w * config.zoom_factor)
-        if new_h <= h or new_w <= w:
-            return frame
-        enlarged = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        top = (new_h - h) // 2
-        left = (new_w - w) // 2
-        return enlarged[top:top + h, left:left + w].copy()
 
     @staticmethod
     def blur_background(frame: np.ndarray, config: VideoConfig) -> np.ndarray:
@@ -508,21 +553,20 @@ class VideoEffects:
         """
         对视频帧应用颜色偏移效果。
 
-        参数:
-            frame: 当前视频帧
-            config: 视频处理配置对象
-
-        返回:
-            np.ndarray: 应用颜色偏移后的帧
+        偏移量取 config.color_shift_value（整个视频固定）：原实现每帧调用
+        random.randint 重新取，画面 B/G 通道每帧来回跳，肉眼是颜色闪烁，
+        编码器则要额外花码率去追，解出来就是发糊和噪点。固定值同样改变了
+        每个像素的色度（去重仍然有效），但整片一致，不产生时间噪声。
         """
         if config.enable_color_shift:
-            b, g, r = cv2.split(frame)
-            shift = random.randint(-config.color_shift_range, config.color_shift_range)
-            b = b.astype(np.int16)
-            g = g.astype(np.int16)
-            b = np.clip(b + shift, 0, 255).astype(np.uint8)
-            g = np.clip(g - shift, 0, 255).astype(np.uint8)
-            frame = cv2.merge((b, g, r))
+            shift = config.color_shift_value
+            if shift:
+                b, g, r = cv2.split(frame)
+                b = b.astype(np.int16)
+                g = g.astype(np.int16)
+                b = np.clip(b + shift, 0, 255).astype(np.uint8)
+                g = np.clip(g - shift, 0, 255).astype(np.uint8)
+                frame = cv2.merge((b, g, r))
         return frame
 
     @staticmethod
@@ -571,7 +615,10 @@ class VideoEffects:
     # 相位扰动本身很小（scramble_frequency≈0.1 弧度），用“先缩小再扰后升采样回原尺寸、
     # 与原帧混合”的方式能得到视觉上一样的效果，耗时降到约 1/20。
     _SCRAMBLE_MAX_SIDE = 720
-    _SCRAMBLE_BLEND = 0.35
+    # 混合比例 0.35 → 0.15（2026-11-16）：0.35 时缩略副本的相位噪声在
+    # 大画面上是肉眼可见的“闪砂”，属于画质-去重性价比最差的一档；
+    # 0.15 仍会改动每个像素的相位/取值，pHash 照样变，但观感干净得多。
+    _SCRAMBLE_BLEND = 0.15
 
     @staticmethod
     def _scramble_fft(frame: np.ndarray, frequency: float) -> np.ndarray:

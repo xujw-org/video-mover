@@ -21,6 +21,8 @@ def test_defaults():
     assert config.frame_swap_interval == 15
     assert config.scramble_frequency == 0.0
     assert config.enable_texture_noise is False
+    assert config.enable_blur_edge is False
+    assert config.output_crf == 18
 
 
 def test_validate_passes_with_existing_files(tmp_path):

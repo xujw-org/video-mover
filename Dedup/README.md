@@ -50,31 +50,32 @@ Dedup/
   -> 帧：enable_frame_swap 时用 swapped_frame_generator（交换相邻帧），
      否则用 _frame_generator；分批（batch_size）+ ThreadPoolExecutor(4) 并行
   -> _process_single_frame（单帧处理链，顺序固定，见下）
-  -> _write_frames：ffmpeg pipe rawvideo -> libx264 + aac，preset fast，crf 23，b:v 2M；
-     输出帧率 = 原帧率 × playback_speed（第 2 步），帧数不变，时长随之变化
+  -> _write_frames：ffmpeg pipe rawvideo -> libx264 + aac，preset fast，crf 走
+     config.output_crf（默认 18）；输出帧率 = 原帧率 × playback_speed（第 2 步），
+     帧数不变，时长随之变化
 ```
 
 单帧处理链顺序（`_process_single_frame`，不要轻易调换）：
 
 1. BGR -> RGB
 2. 水平镜像（`flip_horizontal`）
-3. `rotate_frame` 旋转
-4. 按 `crop_percentage` 裁剪，再缩放回原始尺寸
-5. `apply_zoom` 轻微缩放：先放大再居中裁回原尺寸（第 2 步新增）
-6. `adjust_sbc` 饱和度 / 亮度 / 对比度
-7. `apply_hue_shift` 色相偏移（第 2 步新增）
-8. `add_watermark` 水印（`include_watermark`）
-9. `add_subtitles` 字幕（`include_subtitles` 且字幕已加载）
-10. `add_titles` 顶部 / 底部标题（`include_titles`）
-11. `add_hzh_effect` 画中画
-12. `color_shift` 颜色偏移
-13. `blur_background` 背景模糊
-14. `scramble_phase` 频域扰乱
-15. `add_texture_noise` 纹理噪声
-16. `apply_edge_blur` 边缘模糊
-17. `apply_gaussian_blur` 高斯模糊（按帧步长）
-18. `apply_fade_effect` 淡入淡出
-19. RGB -> BGR 返回
+3. `apply_geometry`：旋转 + 裁剪 + 缩放 + zoom 合并成**一次** `warpAffine`
+   （镜像补边；放大 >1.15× 时用 CUBIC）。原链路是 rotate → 裁剪 → resize →
+   zoom，最多 3 次插值，裁剪大时明显发软。
+4. `adjust_sbc` 饱和度 / 亮度 / 对比度（LUT 饱和截断）
+5. `apply_hue_shift` 色相偏移（第 2 步新增）
+6. `add_watermark` 水印（`include_watermark`）
+7. `add_subtitles` 字幕（`include_subtitles` 且字幕已加载）
+8. `add_titles` 顶部 / 底部标题（`include_titles`）
+9. `add_hzh_effect` 画中画（默认关闭：整幅半透明叠加会显得发虚）
+10. `color_shift` 颜色偏移（整片固定 `color_shift_value`，不再逐帧随机）
+11. `blur_background` 背景模糊
+12. `scramble_phase` 频域扰乱（默认关；开启时混合比例 0.15）
+13. `add_texture_noise` 纹理噪声（默认关）
+14. `apply_edge_blur` 边缘模糊（默认关）
+15. `apply_gaussian_blur` 高斯模糊（按帧步长）
+16. `apply_fade_effect` 淡入淡出
+17. RGB -> BGR 返回
 
 播放速度与音画同步（第 2、3 步）：`playback_speed` 只改输出帧率
 （`_write_frames` 用 `原帧率 × 速度`），字幕仍按原时间查
@@ -128,11 +129,24 @@ VideoHandler(config).process_video("input.mp4", "output.mp4")
 ## 每视频随机参数（2026-11-12）
 
 默认不再用固定参数：CLI 每次按输入文件名派生种子（`VideoConfig.randomized_for()`），
-从安全范围里抽一套参数——旋转 ±6°、裁剪 5–20%、饱和度/对比度 0.90–1.15、
+从安全范围里抽一套参数——旋转 ±6°、裁剪 4–12%、饱和度/对比度 0.90–1.15、
 亮度 −0.10–0.15、帧交换间隔 5/8/10/12/15/20、水印透明度、背景音乐音量等，
-25% 概率镜像、30% 概率开纹理噪声、20% 概率开轻频域扰乱。同一文件名重跑得到
+25% 概率镜像、10% 概率开轻频域扰乱（0.05–0.15）。同一文件名重跑得到
 同一套参数（可复现），不同视频参数组合不同。`--seed N` 指定种子，
-`--no-randomize` 恢复原来的固定默认值。`VideoConfig()` 的默认值本身没变。
+`--no-randomize` 恢复原来的固定默认值。
+
+画质修复（2026-11-16）：纹理噪声与边缘模糊不再默认/随机开启（前者是逐帧
+高频白噪声，肉眼几乎看不出颗粒感却让编码器多花码率；后者把 Canny 边缘再
+高斯模糊后按 10% 叠加，等于给整片蒙灰）；颜色偏移改为每视频固定一个值，
+不再逐帧随机（消除颜色闪烁）；频域扰乱概率 20%→10%、混合 0.35→0.15；
+旋转/裁剪/缩放/zoom 合并成一次 `apply_geometry` 重采样（此前每帧最多采 3
+次，裁剪 20% 时还要放大 1.7×），放大用 CUBIC，裁剪范围收窄到 4–12%；
+画中画默认关闭（整幅半透明叠加会显得发虚）；水印默认固定在**左下角**
+（`watermark_direction='bottom_left'`，边距为短边 3%；也支持四角 / 8 向移动 /
+random 整片固定一点，原来 random 是每帧随机、观感是“有东西在画面里乱跳”）；
+水印图没有透明通道时用亮度当 alpha（深色背景透明、亮色 logo 保留），否则整块
+方形背景会以低透明度糊在画面上；编码 CRF 从写死的 23 改为
+`config.output_crf`（默认 18）。去重侧的几何/色相/帧交换/速度/水印扰动全部保留。
 
 第 2 步（2026-11-12）：在随机参数里加了播放速度 0.95–1.05、色相偏移
 ±10°、缩放 1.02–1.08。速度只改输出帧率与音频 tempo，时长随之变化，
