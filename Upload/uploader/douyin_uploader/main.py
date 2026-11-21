@@ -26,6 +26,10 @@ except ImportError:  # 单文件方式加载（测试里的 spec_from_file_locat
     )
 
 
+class ManualVerificationRequired(RuntimeError):
+    """平台要求短信/人工验证，但当前是无窗口浏览器，必须切到有界面窗口。"""
+
+
 def upload_headless() -> bool:
     """上传时是否无窗口跑（默认是）。
 
@@ -370,11 +374,9 @@ class DouYinVideo(object):
             await asyncio.sleep(2)
         # 有的账号发布前就被要求先做短信验证（弹窗直接挡在上面）
         if await self._sms_modal_visible(page):
-            if upload_headless():
-                raise RuntimeError(
-                    "抖音要求短信验证码，但当前是无窗口模式，没法人工输入。"
-                    "请用有界面模式重跑：set DOUYIN_UPLOAD_HEADED=1 && "
-                    "python Upload/douyin_upload.py"
+            if self._headless:
+                raise ManualVerificationRequired(
+                    "抖音要求短信验证码，无窗口模式无法输入"
                 )
             if not await self._wait_for_manual_code(page):
                 raise RuntimeError("等待短信验证码超时（10 分钟），本次不发布")
@@ -392,10 +394,9 @@ class DouYinVideo(object):
 
         # 点完发布才冒出验证码弹窗的情况：等人工输入，通过后抖音通常自己就发布了
         if await self._sms_modal_visible(page):
-            if upload_headless():
-                raise RuntimeError(
-                    "抖音要求短信验证码才能发布；无窗口模式无法输入。"
-                    "请用 set DOUYIN_UPLOAD_HEADED=1 重跑，在窗口里输入验证码。"
+            if self._headless:
+                raise ManualVerificationRequired(
+                    "抖音要求短信验证码才能发布，无窗口模式无法输入"
                 )
             if await self._wait_for_manual_code(page):
                 if await self._already_on_manage(page, 30):
@@ -426,9 +427,8 @@ class DouYinVideo(object):
             f"（截图: {shot}）。为避免触发风控，已停止重试。"
         )
 
-    async def upload(self, playwright: Playwright) -> None:
-        # 使用 Chromium 浏览器启动一个浏览器实例（默认无窗口，见 upload_headless）
-        headless = upload_headless()
+    async def upload(self, playwright: Playwright, headless: bool = True) -> None:
+        self._headless = headless
         browser = await playwright.chromium.launch(
             **launch_options(headless, self.local_executable_path)
         )
@@ -894,7 +894,21 @@ class DouYinVideo(object):
             douyin_logger.warning(f"  [-] 设置地理位置失败，跳过: {str(exc).splitlines()[0]}")
 
     async def main(self):
+        if upload_headless():
+            try:
+                await self._run_browser(headless=True)
+                return
+            except ManualVerificationRequired as exc:
+                douyin_logger.warning(
+                    "  [-] 抖音要求短信验证码：自动切换到有界面浏览器，"
+                    "请在弹出的窗口里输入手机收到的验证码（最多等 10 分钟）"
+                )
+                douyin_logger.info(f"  [-] 切换原因：{exc}")
+                douyin_logger.info("  [-] 会重新走一遍上传流程，请不要关闭弹出的窗口")
+        await self._run_browser(headless=False)
+
+    async def _run_browser(self, headless: bool) -> None:
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            await self.upload(playwright, headless=headless)
 
 
