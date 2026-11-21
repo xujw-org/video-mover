@@ -175,6 +175,20 @@ def aweme_create_time(aweme: dict) -> Optional[datetime]:
         return None
 
 
+def to_local_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """把带时区的 datetime 归一成系统本地时区的 naive 值。
+
+    作品时间来自 ``create_time``（Unix 时间戳）→ ``datetime.fromtimestamp()``
+    得到本地 naive；而调度器补抓模式给的 since/until 是带时区的 datetime
+    （``datetime.now(ZoneInfo(cfg.TIMEZONE))``）。两者直接比较会抛
+    ``TypeError: can't compare offset-naive and offset-aware datetimes``。
+    时间戳本身是绝对时刻，换成系统本地 wall time 比较语义不变。
+    """
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone().replace(tzinfo=None)
+
+
 def iter_video_urls(aweme: dict) -> Iterator[str]:
     """按优先级给出可尝试的视频地址。
 
@@ -236,6 +250,8 @@ def plan_downloads(
     换成 aweme_id 就只能拿一串数字当标题。
     """
     base = Path(download_dir) / _safe_name(nickname)
+    since = to_local_naive(since)
+    until = to_local_naive(until)
     plan: list[tuple[dict, list[str], Path]] = []
     for aweme in awemes:
         if not is_video_aweme(aweme):
@@ -323,6 +339,7 @@ def fetch_profile_awemes(
     读响应、滚动翻页。滚动会在“已到时间窗口下界 / 没有新响应 / 滚动次数
     用尽”时停止。
     """
+    since = to_local_naive(since)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - playwright 是运行依赖

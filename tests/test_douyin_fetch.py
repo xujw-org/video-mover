@@ -8,7 +8,7 @@ f2 0.0.1.7 没有这些字段，请求必然 403。抓取改走浏览器通道�
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -155,6 +155,39 @@ def test_parse_time_range_string():
 
 # --------------------------------------------------------------------------
 # 下载计划：路径结构、时间窗口、已存在跳过
+# --------------------------------------------------------------------------
+def test_plan_downloads_accepts_aware_window(tmp_path):
+    """补抓模式传入带时区的 since/until，作品时间是本地 naive，不能抛 TypeError。"""
+    now = datetime.now(timezone.utc)
+    awemes = [
+        _video_aweme("fresh", int(now.timestamp())),
+        _video_aweme("old", int((now - timedelta(days=30)).timestamp())),
+    ]
+    plan = douyin_fetch.plan_downloads(
+        awemes,
+        download_dir=tmp_path,
+        nickname="昵称",
+        since=now - timedelta(days=7),
+        until=now,
+    )
+    assert [entry[0]["aweme_id"] for entry in plan] == ["fresh"]
+
+
+def test_to_local_naive_keeps_naive_and_none():
+    naive = datetime(2026, 11, 21, 12, 0, 0)
+    assert douyin_fetch.to_local_naive(naive) is naive
+    assert douyin_fetch.to_local_naive(None) is None
+
+
+def test_to_local_naive_preserves_the_instant():
+    aware = datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    local = douyin_fetch.to_local_naive(aware)
+    assert local.tzinfo is None
+    assert local == aware.astimezone().replace(tzinfo=None)
+
+
+# --------------------------------------------------------------------------
+# 下载计划：落盘布局与过滤
 # --------------------------------------------------------------------------
 def test_plan_downloads_layout_and_filters(tmp_path):
     in_window = _video_aweme(aweme_id="7600000000000000001", create_time=1785475972)
