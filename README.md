@@ -100,7 +100,8 @@ Content input
 - Node.js 22.x
 - FFmpeg（PATH 里有就直接用；Windows 下 `setup.bat` 会自动下载到
   `tools\ffmpeg`）
-- Chrome
+- Chrome（可选；没装时用 `setup.bat` 安装的 Playwright Chromium，可用
+  `DOUYIN_CHROME_PATH` 指定路径）
 
 ### 安装
 

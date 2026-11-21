@@ -72,7 +72,8 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 - Node.js 22.x
 - FFmpeg (`PATH` is used when present; on Windows `setup.bat` downloads it to
   `tools\ffmpeg` when missing)
-- Chrome
+- Chrome (optional: falls back to the Playwright Chromium installed by
+  `setup.bat`; set `DOUYIN_CHROME_PATH` to pin a path)
 
 ### Installation
 

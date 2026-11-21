@@ -71,7 +71,9 @@ async def _looks_like_login_page(page) -> bool:
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(**launch_options(headless=True))
+        browser = await playwright.chromium.launch(
+            **launch_options(headless=True, executable_path=LOCAL_CHROME_PATH)
+        )
         context = await browser.new_context(storage_state=account_file, **context_options())
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -117,7 +119,9 @@ async def douyin_cookie_gen(account_file):
         # 用和上传时一致的 UA/语言/时区/Client Hints 登录（这些进 HTTP 头），
         # 但视口跟随真实窗口并最大化：固定 1920x1080 时，小屏/高分屏机器上
         # 窗口超出屏幕，抖音登录页的二维码画在视口中央，会跑到屏幕外。
-        browser = await playwright.chromium.launch(**login_launch_options())
+        browser = await playwright.chromium.launch(
+            **login_launch_options(executable_path=LOCAL_CHROME_PATH)
+        )
         context = await browser.new_context(**login_context_options())
         context = await set_init_script(context)
         page = await context.new_page()
