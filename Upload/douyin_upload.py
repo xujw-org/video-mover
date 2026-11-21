@@ -281,8 +281,9 @@ async def upload_one(video_path, title, tags, account_file, cover_dir=None, hot_
     # 延迟导入：本脚本的纯函数（标题解析等）被测试导入时不需要 playwright。
     from uploader.douyin_uploader.main import DouYinVideo
 
-    # 只要竖封面（3:4）：抖音会用它做推荐流封面；横封面不强求，实在设不上
-    # 就退回让平台用 AI 推荐的封面（见 uploader 里的 _use_ai_cover）。
+    # 只要竖封面（3:4）：手机端/推荐流用的就是它。横封面只影响 PC/精选展示，
+    # 平台设置横封面的入口在自动化里一直点不动（会多花 30 秒再报“找不到上传
+    # 封面输入框”），所以不再尝试，页面提示“横封面缺失”属于已知的次要提示。
     cover_path = None
     try:
         from cover import VERTICAL_SIZE, make_cover

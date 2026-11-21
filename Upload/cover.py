@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -17,16 +18,44 @@ from pathlib import Path
 VERTICAL_SIZE = (1080, 1440)
 HORIZONTAL_SIZE = (1440, 1080)
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _bundled_tool(name: str) -> Path:
+    exe = f"{name}.exe" if os.name == "nt" else name
+    return REPO_ROOT / "tools" / "ffmpeg" / "bin" / exe
+
+
+def _tool(name: str, env_var: str | None = None) -> str:
+    """工具路径：显式覆盖 -> PATH -> 仓库自带 tools/ffmpeg。
+
+    上传脚本也可能被单独启动（没有经过 main.py 的 PATH 注入），只靠 PATH
+    会在没装 ffmpeg 的机器上生成封面失败，最后发布出去就是“封面缺失”。
+    """
+    if env_var:
+        override = os.environ.get(env_var)
+        if override:
+            return override
+    found = shutil.which(name)
+    if found:
+        return found
+    bundled = _bundled_tool(name)
+    return str(bundled) if bundled.is_file() else name
+
 
 def _ffmpeg_exe() -> str:
-    return os.environ.get("FFMPEG_BIN") or "ffmpeg"
+    return _tool("ffmpeg", "FFMPEG_BIN")
+
+
+def _ffprobe_exe() -> str:
+    return _tool("ffprobe")
 
 
 def video_duration(video_path) -> float:
     """视频时长（秒），拿不到返回 0。"""
     try:
         completed = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [_ffprobe_exe(), "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", str(video_path)],
             capture_output=True, text=True,
         )
