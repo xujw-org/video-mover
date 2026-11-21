@@ -10,6 +10,20 @@ import time
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
+try:  # 正常由 uploader.douyin_uploader.main 以包方式导入
+    from .browser_options import (
+        context_options,
+        launch_options,
+        login_context_options,
+        login_launch_options,
+    )
+except ImportError:  # 单文件方式加载（测试里的 spec_from_file_location / 调试脚本）
+    from uploader.douyin_uploader.browser_options import (
+        context_options,
+        launch_options,
+        login_context_options,
+        login_launch_options,
+    )
 
 
 def upload_headless() -> bool:
@@ -53,51 +67,6 @@ async def _looks_like_login_page(page) -> bool:
         except Exception:
             continue
     return False
-
-
-# 抖音风控会比对“sessionid 的签发设备”和“正在使用它的浏览器”是否同一台。
-# Playwright 的 headless Chromium 默认 UA 是
-#   ...HeadlessChrome/158.0.8127.18 Safari/537.36
-# 服务器一看就知道是无头浏览器，于是把这个 session 判成可疑并强制登出 ——
-# 这正是发布几次之后 cookie 就失效的元凶（stealth.min.js 只改 JS 层，
-# 屏蔽不了 HTTP 头里的 UA）。所以所有抖音上下文统一用真 Chrome 的 UA/视口/语言/时区。
-DESKTOP_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
-)
-
-
-# Chromium 的 UA 伪造了，但 **客户端提示（Client Hints）** 还是暴露真实身份：实测
-#   sec-ch-ua: "Chromium";v="158", "Not.A/Brand";v="24", "HeadlessChrome";v="158"
-# 服务端只要读这个头就知道是无头浏览器，所以必须一起覆盖。
-DESKTOP_CH_UA = '"Google Chrome";v="157", "Chromium";v="157", "Not.A/Brand";v="24"'
-
-
-def context_options() -> dict:
-    """抖音浏览器上下文统一参数（UA/客户端提示/视口/语言/时区/DPR）。"""
-    return {
-        "user_agent": os.environ.get("DOUYIN_UPLOAD_UA", DESKTOP_UA),
-        "viewport": {"width": 1920, "height": 1080},
-        "locale": "zh-CN",
-        "timezone_id": "Asia/Shanghai",
-        "device_scale_factor": 1,
-        "extra_http_headers": {
-            "sec-ch-ua": DESKTOP_CH_UA,
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-        },
-    }
-
-
-def launch_options(headless: bool, executable_path: str | None = None) -> dict:
-    """Chromium 启动参数：关掉 AutomationControlled，避免 navigator.webdriver。"""
-    options: dict = {
-        "headless": headless,
-        "args": ["--disable-blink-features=AutomationControlled"],
-    }
-    if executable_path:
-        options["executable_path"] = executable_path
-    return options
 
 
 async def cookie_auth(account_file):
@@ -145,10 +114,11 @@ async def douyin_cookie_gen(account_file):
     （轮询 cookie + 进上传页确认不是登录页），检测到就保存，最多等 5 分钟。
     """
     async with async_playwright() as playwright:
-        # 用和上传时完全一致的 UA/视口/语言/时区登录，
-        # 这样抖音记录的“设备”就是之后发布用的那个设备。
-        browser = await playwright.chromium.launch(**launch_options(headless=False))
-        context = await browser.new_context(**context_options())
+        # 用和上传时一致的 UA/语言/时区/Client Hints 登录（这些进 HTTP 头），
+        # 但视口跟随真实窗口并最大化：固定 1920x1080 时，小屏/高分屏机器上
+        # 窗口超出屏幕，抖音登录页的二维码画在视口中央，会跑到屏幕外。
+        browser = await playwright.chromium.launch(**login_launch_options())
+        context = await browser.new_context(**login_context_options())
         context = await set_init_script(context)
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/")
