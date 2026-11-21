@@ -98,14 +98,21 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
    ```
 
 3. Run `setup.bat` (pass another environment name as the first argument if needed: `setup.bat myenv`).
-   It creates the environment when missing, then upgrades pip, installs
-   `requirements.txt` and `requirements-dev.txt`, installs the Playwright
+   It creates the environment when missing, then upgrades pip, prepares PyTorch,
+   installs `requirements.txt` and `requirements-dev.txt`, installs the Playwright
    browsers, applies upstream patches, and checks `ffmpeg` / `ffprobe`.
    To re-check an existing environment:
 
    ```bash
    python scripts/win_env.py check --env dy
    ```
+
+   > **Machines without a GPU**: the torch wheel that `openai-whisper` pulls on
+   > Windows bundles CUDA (2-3 GB), which looks like a hang. When no NVIDIA GPU is
+   > detected, `setup.bat` installs the CPU build first
+   > (`--index-url https://download.pytorch.org/whl/cpu`), so the requirements step
+   > does not download CUDA again. Force either build with `setup.bat --torch cpu`
+   > or `setup.bat --torch cuda`.
 
    > **Why the `.bat` files contain no Chinese text**: cmd.exe decodes batch files with the
    > system code page (cp936 on Simplified Chinese Windows), so UTF-8 Chinese text is

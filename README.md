@@ -126,9 +126,17 @@ Content input
    ```
 
 3. 运行 `setup.bat`（默认环境名 `dy`，已有环境名不同时用第一个参数指定）。
-   它会依次执行：确认/创建环境 → 升级 pip → 安装 `requirements.txt` →
-   安装 `requirements-dev.txt` → 安装 Playwright 浏览器（chromium / firefox）
-   → 应用上游兼容补丁 → 检查 `ffmpeg` / `ffprobe` 是否在 `PATH` 中。
+   它会依次执行：确认/创建环境 → 升级 pip → 准备 PyTorch → 安装
+   `requirements.txt` → 安装 `requirements-dev.txt` → 安装 Playwright 浏览器
+   （chromium / firefox）→ 应用上游兼容补丁 → 检查 `ffmpeg` / `ffprobe` 是否
+   在 `PATH` 中。
+
+   > **没有显卡的老机器**：`openai-whisper` 依赖的 torch 在 Windows 上默认自带
+   > CUDA，安装包有 2~3 GB，很容易看起来“卡死”。`setup.bat` 检测不到 NVIDIA
+   > 显卡时会先装 CPU 构建（`--index-url https://download.pytorch.org/whl/cpu`），
+   > 之后的 requirements 不会再拉 CUDA 版。也可以显式指定：
+   > `setup.bat --torch cpu`（强制 CPU）或 `setup.bat --torch cuda`（强制默认
+   > CUDA 构建）。
 
    安装完成后想复查环境，执行：
 

@@ -2,8 +2,11 @@
 rem ===========================================================================
 rem Video Mover - Windows setup launcher
 rem
-rem Usage:   setup.bat [conda-env-name]      (default: dy)
+rem Usage:   setup.bat [conda-env-name] [options]    (default env: dy)
 rem Example: setup.bat dy
+rem          setup.bat --with-assets
+rem          setup.bat --torch cpu      (force the CPU PyTorch build)
+rem          setup.bat --torch cuda     (force the default CUDA build)
 rem
 rem This file is intentionally ASCII-only. With "chcp 65001" active, cmd.exe
 rem parses UTF-8 .bat files by character offsets and can split a multi-byte

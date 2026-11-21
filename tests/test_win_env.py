@@ -83,6 +83,73 @@ def test_run_flags():
 
 
 # --------------------------------------------------------------------------
+# PyTorch 构建选择（老机器没有显卡时不能拉 CUDA 版本）
+# --------------------------------------------------------------------------
+def test_resolve_torch_mode_auto_follows_gpu(monkeypatch):
+    monkeypatch.setattr(win_env, "_has_nvidia_gpu", lambda: False)
+    assert win_env.resolve_torch_mode("auto") == "cpu"
+    monkeypatch.setattr(win_env, "_has_nvidia_gpu", lambda: True)
+    assert win_env.resolve_torch_mode("auto") == "cuda"
+
+
+def test_resolve_torch_mode_keeps_explicit_choice(monkeypatch):
+    monkeypatch.setattr(win_env, "_has_nvidia_gpu", lambda: True)
+    assert win_env.resolve_torch_mode("cpu") == "cpu"
+    assert win_env.resolve_torch_mode("cuda") == "cuda"
+
+
+def test_setup_accepts_torch_flag():
+    args = win_env.build_parser().parse_args(["setup", "--torch", "cpu"])
+    assert args.torch == "cpu"
+
+
+def test_ensure_torch_installs_cpu_build_when_missing(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(win_env, "_torch_flavor", lambda interpreter: None)
+    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(cmd) or 0)
+
+    assert win_env.ensure_torch(Path("py"), "cpu") is True
+    assert calls == [
+        [
+            "py",
+            "-m",
+            "pip",
+            "install",
+            "torch",
+            "--index-url",
+            win_env.TORCH_CPU_INDEX,
+        ]
+    ]
+    assert "CPU 构建" in capsys.readouterr().out
+
+
+def test_ensure_torch_skips_when_cpu_build_installed(monkeypatch):
+    monkeypatch.setattr(win_env, "_torch_flavor", lambda interpreter: "cpu")
+    monkeypatch.setattr(win_env, "run", lambda cmd: pytest.fail("不应重复安装 torch"))
+    assert win_env.ensure_torch(Path("py"), "cpu") is True
+
+
+def test_ensure_torch_cuda_mode_leaves_torch_to_requirements(monkeypatch):
+    monkeypatch.setattr(win_env, "_torch_flavor", lambda interpreter: None)
+    monkeypatch.setattr(win_env, "run", lambda cmd: pytest.fail("cuda 模式不应预先安装"))
+    assert win_env.ensure_torch(Path("py"), "cuda") is True
+
+
+def test_ensure_torch_failure_does_not_abort_setup(monkeypatch, capsys):
+    monkeypatch.setattr(win_env, "_torch_flavor", lambda interpreter: None)
+    monkeypatch.setattr(win_env, "run", lambda cmd: 1)
+    assert win_env.ensure_torch(Path("py"), "cpu") is False
+    assert "警告" in capsys.readouterr().out
+
+
+def test_run_captured_returns_124_on_timeout():
+    code, _ = win_env.run_captured(
+        [sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.2
+    )
+    assert code == 124
+
+
+# --------------------------------------------------------------------------
 # 解释器解析
 # --------------------------------------------------------------------------
 def _make_env(base, env_name):

@@ -75,7 +75,7 @@ def run(cmd: list[str]) -> int:
         return 127
 
 
-def run_captured(cmd: list[str]) -> tuple[int, str]:
+def run_captured(cmd: list[str], timeout: float | None = None) -> tuple[int, str]:
     """执行命令并静默采集输出（用于探测环境、取版本号）。"""
     try:
         proc = subprocess.run(
@@ -86,9 +86,12 @@ def run_captured(cmd: list[str]) -> tuple[int, str]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=timeout,
         )
     except FileNotFoundError:
         return 127, ""
+    except subprocess.TimeoutExpired:
+        return 124, ""
     return proc.returncode, proc.stdout or ""
 
 
@@ -286,6 +289,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     code, out = run_captured([str(interpreter), "-c", "import sys;print(sys.version.split()[0])"])
     say(f"Python    ：{out.strip() or '未知'}")
 
+    code, out = run_captured(
+        [str(interpreter), "-c", "import torch;print(torch.__version__,'cuda=',torch.version.cuda)"]
+    )
+    say(f"PyTorch   ：{out.strip() or '未安装（whisper 生成字幕需要）'}")
+
     say()
     say("依赖：")
     missing = []
@@ -334,6 +342,70 @@ def cmd_check(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # setup：安装
 # --------------------------------------------------------------------------
+TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
+
+
+def _has_nvidia_gpu() -> bool:
+    code, out = run_captured(["nvidia-smi", "-L"], timeout=20)
+    return code == 0 and "GPU" in out
+
+
+def resolve_torch_mode(requested: str) -> str:
+    """auto：有 NVIDIA 显卡就用默认（CUDA）构建，否则用 CPU 构建。"""
+    if requested != "auto":
+        return requested
+    return "cuda" if _has_nvidia_gpu() else "cpu"
+
+
+def _torch_flavor(interpreter: Path) -> str | None:
+    """已安装 torch 的构建类型：cpu / cuda；未安装返回 None。"""
+    code, out = run_captured(
+        [str(interpreter), "-c", "import torch; print(torch.version.cuda or 'cpu')"],
+        timeout=120,
+    )
+    if code != 0:
+        return None
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    if not lines:
+        return None
+    return "cpu" if lines[-1].lower() == "cpu" else "cuda"
+
+
+def ensure_torch(interpreter: Path, mode: str) -> bool:
+    """Windows 默认 torch wheel 自带 CUDA，约 2~3 GB；无显卡的机器改用 CPU 构建。
+
+    whisper 是唯一需要 torch 的依赖；CPU 构建同样满足 whisper 的依赖声明，
+    后续 pip install -r requirements.txt 不会再下载 PyPI 的体重版。
+    """
+    flavor = _torch_flavor(interpreter)
+    if mode == "cuda":
+        if flavor is None:
+            say("  PyTorch：未安装，交给 requirements 安装默认（CUDA）构建")
+        else:
+            say(f"  PyTorch：已安装（{flavor} 构建），保持不动")
+        return True
+    if flavor == "cpu":
+        say("  PyTorch：已安装 CPU 构建，跳过")
+        return True
+
+    say("  PyTorch：未检测到 NVIDIA GPU，安装 CPU 构建（避免下载数 GB 的 CUDA 依赖）")
+    code = run(
+        [
+            str(interpreter),
+            "-m",
+            "pip",
+            "install",
+            "torch",
+            "--index-url",
+            TORCH_CPU_INDEX,
+        ]
+    )
+    if code != 0:
+        say("  [警告] CPU 版 PyTorch 安装失败；继续装 requirements（可能回退到 PyPI 的 CUDA 构建）")
+        return False
+    return True
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     interpreter = ensure_interpreter(args.env)
     say("=" * 62)
@@ -341,28 +413,32 @@ def cmd_setup(args: argparse.Namespace) -> int:
     say(f"解释器  ：{interpreter}")
     say("=" * 62)
 
-    total = 6
+    total = 7
     step(1, total, "升级 pip")
     if run([str(interpreter), "-m", "pip", "install", "--upgrade", "pip"]) != 0:
         return _fail()
 
-    step(2, total, "安装运行依赖 requirements.txt（opencv / whisper / playwright，首次较慢）")
+    torch_mode = resolve_torch_mode(args.torch)
+    step(2, total, f"准备 PyTorch（构建选择：{torch_mode}）")
+    ensure_torch(interpreter, torch_mode)
+
+    step(3, total, "安装运行依赖 requirements.txt（opencv / whisper / playwright，首次较慢）")
     if run([str(interpreter), "-m", "pip", "install", "-r", "requirements.txt"]) != 0:
         return _fail()
 
-    step(3, total, "安装测试依赖 requirements-dev.txt")
+    step(4, total, "安装测试依赖 requirements-dev.txt")
     if run([str(interpreter), "-m", "pip", "install", "-r", "requirements-dev.txt"]) != 0:
         return _fail()
 
-    step(4, total, "安装 Playwright 浏览器（chromium / firefox）")
+    step(5, total, "安装 Playwright 浏览器（chromium / firefox）")
     if run([str(interpreter), "-m", "playwright", "install", "chromium", "firefox"]) != 0:
         return _fail()
 
-    step(5, total, "应用上游兼容补丁（f2 等，详见 PATCHES.md）")
+    step(6, total, "应用上游兼容补丁（f2 等，详见 PATCHES.md）")
     if run([str(interpreter), str(ROOT / "scripts" / "apply_upstream_patches.py")]) != 0:
         return _fail()
 
-    step(6, total, "检查外部工具（ffmpeg 需在 PATH 中）")
+    step(7, total, "检查外部工具（ffmpeg 需在 PATH 中）")
     for tool in ("ffmpeg", "ffprobe"):
         path = shutil.which(tool)
         say(f"  {tool:<8} {path if path else '未找到 —— 请安装 ffmpeg 并加入 PATH'}")
@@ -450,6 +526,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_setup = sub.add_parser("setup", help="安装依赖、Playwright 浏览器并应用上游补丁")
     p_setup.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
+    p_setup.add_argument(
+        "--torch",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help="PyTorch 构建：auto 按是否有 NVIDIA 显卡决定（无显卡装 CPU 版），默认 auto",
+    )
     p_setup.add_argument("--with-assets", action="store_true", help="同时下载大二进制资产")
     p_setup.set_defaults(func=cmd_setup)
 

@@ -40,6 +40,11 @@ ffmpeg-python==0.2.0
 opencc-python-reimplemented==0.1.7
 numpy==2.5.4
 pysrt==1.1.2
+# openai-whisper 会带上 torch：Windows 上 PyPI 的 torch 默认自带 CUDA（2~3 GB，
+# 老机器上看起来像卡死）。setup.bat 检测不到 NVIDIA 显卡时先装 CPU 构建
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 之后的 torch 依赖即被满足，不会再下载 CUDA 版。手动强制：
+#   setup.bat --torch cpu | cuda
 openai-whisper==20250625
 pydub==0.25.1
 # Python 3.13 移除了 audioop，pydub 会转去 import pyaudioop，缺包即 ImportError
