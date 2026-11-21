@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -150,6 +152,58 @@ def test_run_captured_returns_124_on_timeout():
 
 
 # --------------------------------------------------------------------------
+# ffmpeg 准备：PATH -> 仓库自带 -> 自动下载
+# --------------------------------------------------------------------------
+def test_ensure_ffmpeg_prefers_path(monkeypatch, capsys):
+    monkeypatch.setattr(win_env.shutil, "which", lambda name: f"C:/bin/{name}.exe")
+    monkeypatch.setattr(win_env, "_install_ffmpeg_from_zip", lambda: pytest.fail("不应下载"))
+    assert win_env.ensure_ffmpeg() == Path("C:/bin")
+    assert "已在 PATH" in capsys.readouterr().out
+
+
+def test_ensure_ffmpeg_uses_bundled_copy(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "tools" / "ffmpeg" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / win_env._ffmpeg_exe_name()).write_bytes(b"")
+    monkeypatch.setattr(win_env, "ROOT", tmp_path)
+    monkeypatch.setattr(win_env.shutil, "which", lambda name: None)
+    assert win_env.ensure_ffmpeg() == bin_dir
+
+
+@pytest.mark.skipif(os.name != "nt", reason="自动下载只在 Windows 上启用")
+def test_install_ffmpeg_extracts_only_bin(tmp_path, monkeypatch):
+    monkeypatch.setattr(win_env, "ROOT", tmp_path)
+    monkeypatch.setattr(win_env, "_ffmpeg_exe_name", lambda: "ffmpeg.exe")
+    monkeypatch.setattr(win_env.shutil, "which", lambda name: None)
+
+    zip_src = tmp_path / "src.zip"
+    with zipfile.ZipFile(zip_src, "w") as archive:
+        archive.writestr("ffmpeg-9.1-essentials_build/bin/ffmpeg.exe", b"f")
+        archive.writestr("ffmpeg-9.1-essentials_build/bin/ffprobe.exe", b"p")
+        archive.writestr("ffmpeg-9.1-essentials_build/README.txt", b"r")
+
+    def fake_download(url, dest, timeout=60):
+        shutil.copyfile(zip_src, dest)
+        return True
+
+    monkeypatch.setattr(win_env, "_download_verified", fake_download)
+    bin_dir = tmp_path / "tools" / "ffmpeg" / "bin"
+    assert win_env.ensure_ffmpeg() == bin_dir
+    assert (bin_dir / "ffmpeg.exe").read_bytes() == b"f"
+    assert (bin_dir / "ffprobe.exe").read_bytes() == b"p"
+    assert not (bin_dir / "README.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="自动下载只在 Windows 上启用")
+def test_install_ffmpeg_reports_failure(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(win_env, "ROOT", tmp_path)
+    monkeypatch.setattr(win_env.shutil, "which", lambda name: None)
+    monkeypatch.setattr(win_env, "_download_verified", lambda *args, **kwargs: False)
+    assert win_env.ensure_ffmpeg() is None
+    assert "自动安装失败" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
 # 子进程 PATH：venv / conda 未激活时也要能调到 f2
 # --------------------------------------------------------------------------
 def test_env_with_scripts_prepends_venv_dir(tmp_path, monkeypatch):
@@ -166,6 +220,18 @@ def test_env_with_scripts_covers_conda_layout(tmp_path, monkeypatch):
     entries = win_env.env_with_scripts(interpreter)["PATH"].split(os.pathsep)
     assert str(tmp_path) in entries[:2]
     assert str(tmp_path / "Scripts") in entries[:2]
+
+
+def test_env_with_scripts_includes_bundled_ffmpeg(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "tools" / "ffmpeg" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / win_env._ffmpeg_exe_name()).write_bytes(b"")
+    monkeypatch.setattr(win_env, "ROOT", tmp_path)
+    monkeypatch.setenv("PATH", "C:\\Windows")
+
+    entries = win_env.env_with_scripts(Path("python"))["PATH"].split(os.pathsep)
+
+    assert str(bin_dir) in entries
 
 
 def test_env_with_scripts_does_not_duplicate_entries(tmp_path, monkeypatch):

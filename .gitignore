@@ -70,6 +70,9 @@ douyin_users.db
 *.otf
 *.exe
 
+# setup.bat 自动下载的 ffmpeg（约 90 MB，含 ffprobe）
+tools/
+
 # 本地编辑器配置
 .vscode/
 

@@ -70,7 +70,8 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 - Python 3.12+ (conda optional: a project `.venv` is used when conda is absent,
   and `setup.bat` installs Python itself when none is present)
 - Node.js 22.x
-- FFmpeg available on `PATH`
+- FFmpeg (`PATH` is used when present; on Windows `setup.bat` downloads it to
+  `tools\ffmpeg` when missing)
 - Chrome
 
 ### Installation
@@ -100,7 +101,8 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 3. Run `setup.bat` (pass another environment name as the first argument if needed: `setup.bat myenv`).
    It creates the environment when missing, then upgrades pip, prepares PyTorch,
    installs `requirements.txt` and `requirements-dev.txt`, installs the Playwright
-   browsers, applies upstream patches, and checks `ffmpeg` / `ffprobe`.
+   browsers, applies upstream patches, and prepares ffmpeg (downloaded to
+   `tools\ffmpeg` when it is not on `PATH`).
    To re-check an existing environment:
 
    ```bash

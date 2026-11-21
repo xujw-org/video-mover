@@ -98,7 +98,8 @@ Content input
 - Python 3.12+（conda 可选；没有 conda 时脚本用项目内 `.venv`，没有 Python
   时 `setup.bat` 会自动安装）
 - Node.js 22.x
-- FFmpeg（需加入 `PATH`）
+- FFmpeg（PATH 里有就直接用；Windows 下 `setup.bat` 会自动下载到
+  `tools\ffmpeg`）
 - Chrome
 
 ### 安装
@@ -128,8 +129,8 @@ Content input
 3. 运行 `setup.bat`（默认环境名 `dy`，已有环境名不同时用第一个参数指定）。
    它会依次执行：确认/创建环境 → 升级 pip → 准备 PyTorch → 安装
    `requirements.txt` → 安装 `requirements-dev.txt` → 安装 Playwright 浏览器
-   （chromium / firefox）→ 应用上游兼容补丁 → 检查 `ffmpeg` / `ffprobe` 是否
-   在 `PATH` 中。
+   （chromium / firefox）→ 应用上游兼容补丁 → 准备 ffmpeg（`PATH` 里没有就
+   自动下载到 `tools\ffmpeg`）。
 
    > **没有显卡的老机器**：`openai-whisper` 依赖的 torch 在 Windows 上默认自带
    > CUDA，安装包有 2~3 GB，很容易看起来“卡死”。`setup.bat` 检测不到 NVIDIA

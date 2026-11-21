@@ -60,3 +60,24 @@ def test_returns_original_when_nothing_found(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module.sys, "executable", str(python))
     command = ["f2", "tk"]
     assert main_module._resolve_executable_command(command) == command
+
+
+def test_prepend_bundled_tools_adds_ffmpeg_bin(tmp_path, monkeypatch):
+    bundled = tmp_path / "tools" / "ffmpeg" / "bin"
+    bundled.mkdir(parents=True)
+    (bundled / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")).write_bytes(b"")
+    monkeypatch.setattr(main_module, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("PATH", "C:\\Windows")
+
+    main_module._prepend_bundled_tools()
+
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(bundled)
+
+
+def test_prepend_bundled_tools_is_noop_without_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("PATH", "C:\\Windows")
+
+    main_module._prepend_bundled_tools()
+
+    assert os.environ["PATH"] == "C:\\Windows"

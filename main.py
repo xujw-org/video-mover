@@ -138,6 +138,30 @@ def _resolve_executable_command(command: list) -> list:
                 return [str(candidate), *(str(x) for x in command[1:])]
     return command
 
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _prepend_bundled_tools() -> None:
+    """把 setup.bat 下载的 tools/ffmpeg/bin 放到 PATH 最前面。
+
+    Dedup 子进程（ffmpeg-python / pydub）都按 PATH 找 ffmpeg/ffprobe；
+    直接 `python main.py` 启动时也要能用上仓库自带版本。
+    """
+    bundled = REPO_ROOT / "tools" / "ffmpeg" / "bin"
+    exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    if not (bundled / exe).is_file():
+        return
+    current = os.environ.get("PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    if str(bundled).lower() in {entry.lower() for entry in entries}:
+        return
+    os.environ["PATH"] = str(bundled) + (os.pathsep + current if current else "")
+
+
+_prepend_bundled_tools()
+
+
 # 环境变量名前缀：环境变量优先于 my_apps.yaml，优先于内置默认值。
 ENV_PREFIX = "VIDEO_MOVER_"
 

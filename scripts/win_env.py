@@ -29,10 +29,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -310,7 +314,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     say("外部工具：")
     for tool in ("ffmpeg", "ffprobe"):
         path = shutil.which(tool)
-        say(f"  {tool:<8} {path if path else '未找到（需加入 PATH）'}")
+        say(f"  {tool:<8} {path if path else '未找到（PATH 中没有）'}")
+    bundled = bundled_ffmpeg_bin()
+    say(f"  bundled {bundled if bundled else '无（运行 setup.bat 自动下载）'}")
 
     browsers = Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
     if browsers.is_dir():
@@ -406,6 +412,130 @@ def ensure_torch(interpreter: Path, mode: str) -> bool:
     return True
 
 
+FFMPEG_ZIP_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+
+def _ffmpeg_exe_name() -> str:
+    return "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+
+
+def _ffmpeg_local_bin() -> Path:
+    return ROOT / "tools" / "ffmpeg" / "bin"
+
+
+def bundled_ffmpeg_bin() -> Path | None:
+    """仓库自带（setup 自动下载）的 ffmpeg bin 目录。"""
+    candidate = _ffmpeg_local_bin()
+    return candidate if (candidate / _ffmpeg_exe_name()).is_file() else None
+
+
+def ffmpeg_available() -> bool:
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return True
+    return bundled_ffmpeg_bin() is not None
+
+
+def _fetch_sha256(url: str) -> str | None:
+    try:
+        with urllib.request.urlopen(url + ".sha256", timeout=20) as response:
+            text = response.read().decode("ascii", "replace").strip()
+    except Exception:
+        return None
+    token = (text.split()[0] if text else "").lower()
+    return token if len(token) == 64 else None
+
+
+def _download_verified(url: str, dest: Path, timeout: float = 60) -> bool:
+    """下载并校验官方 sha256；取不到校验文件时只告警（来源 gyan.dev）。"""
+    say(f"  下载 ffmpeg：{url}")
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response, dest.open("wb") as fh:
+            final_url = response.geturl()
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                digest.update(chunk)
+                total += len(chunk)
+    except Exception as exc:
+        say(f"  [错误] 下载失败：{exc}")
+        return False
+    say(f"  下载完成：{total / 1024 / 1024:.1f} MB")
+
+    expected = _fetch_sha256(final_url)
+    if not expected:
+        say("  [警告] 没取到官方 sha256，跳过校验")
+        return True
+    if digest.hexdigest() != expected:
+        dest.unlink(missing_ok=True)
+        say("  [错误] sha256 校验失败，已丢弃下载文件")
+        return False
+    say("  sha256 校验通过")
+    return True
+
+
+def _install_ffmpeg_from_zip() -> bool:
+    """下载 gyan.dev essentials 构建，解压出 bin/ffmpeg.exe + ffprobe.exe。"""
+    target = _ffmpeg_local_bin()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        zip_path = tmp_path / "ffmpeg.zip"
+        if not _download_verified(FFMPEG_ZIP_URL, zip_path):
+            return False
+
+        extract_dir = tmp_path / "extract"
+        try:
+            with zipfile.ZipFile(zip_path) as archive:
+                archive.extractall(extract_dir)
+        except (zipfile.BadZipFile, OSError) as exc:
+            say(f"  [错误] 解压失败：{exc}")
+            return False
+
+        candidate = next(
+            (path for path in extract_dir.rglob(_ffmpeg_exe_name()) if path.parent.name == "bin"),
+            None,
+        )
+        if candidate is None:
+            say("  [错误] 压缩包里没找到 bin/ffmpeg.exe")
+            return False
+        src_bin = candidate.parent
+        for name in ("ffmpeg.exe", "ffprobe.exe"):
+            if not (src_bin / name).is_file():
+                say(f"  [错误] 压缩包里缺少 {name}")
+                return False
+
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_bin, target)
+    say(f"  已安装到 {target}")
+    return True
+
+
+def ensure_ffmpeg() -> Path | None:
+    """确保 ffmpeg / ffprobe 可用：PATH 优先，其次仓库自带，最后自动下载。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg and shutil.which("ffprobe"):
+        say(f"  ffmpeg 已在 PATH：{Path(ffmpeg).parent}")
+        return Path(ffmpeg).parent
+    bundled = bundled_ffmpeg_bin()
+    if bundled:
+        say(f"  ffmpeg 使用仓库自带版本：{bundled}")
+        return bundled
+    if os.name != "nt":
+        say("  [警告] 未找到 ffmpeg，请先安装（apt install ffmpeg / brew install ffmpeg）")
+        return None
+    say("  未找到 ffmpeg，下载官方 essentials 构建到 tools\\ffmpeg（约 90 MB）")
+    if _install_ffmpeg_from_zip():
+        return bundled_ffmpeg_bin()
+    say("  [警告] 自动安装失败；手动下载 https://www.gyan.dev/ffmpeg/builds/ ，")
+    say("         解压后把 bin 目录加入 PATH，或放到 tools\\ffmpeg\\bin。")
+    return None
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     interpreter = ensure_interpreter(args.env)
     say("=" * 62)
@@ -438,11 +568,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if run([str(interpreter), str(ROOT / "scripts" / "apply_upstream_patches.py")]) != 0:
         return _fail()
 
-    step(7, total, "检查外部工具（ffmpeg 需在 PATH 中）")
-    for tool in ("ffmpeg", "ffprobe"):
-        path = shutil.which(tool)
-        say(f"  {tool:<8} {path if path else '未找到 —— 请安装 ffmpeg 并加入 PATH'}")
-    if not shutil.which("ffmpeg"):
+    step(7, total, "准备 ffmpeg（PATH 中没有就自动下载到 tools\\ffmpeg）")
+    if ensure_ffmpeg() is None:
         say("  （后续视频处理步骤会失败；本步不算安装失败）")
 
     if args.with_assets:
@@ -501,6 +628,9 @@ def env_with_scripts(interpreter: Path) -> dict[str, str]:
     scripts = [str(base)]
     if os.name == "nt" and (base / "Scripts").is_dir():
         scripts.insert(0, str(base / "Scripts"))
+    bundled_ffmpeg = bundled_ffmpeg_bin()
+    if bundled_ffmpeg:
+        scripts.append(str(bundled_ffmpeg))
 
     existing = env.get("PATH", "")
     entries = existing.split(os.pathsep) if existing else []
@@ -525,6 +655,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.dry_run:
         say("（--dry-run：只检查环境，不清理目录、不启动 main.py）")
         return 0
+
+    if not ffmpeg_available():
+        say()
+        say("[依赖] 未找到 ffmpeg / ffprobe，视频处理需要它们；尝试自动安装 ...")
+        ensure_ffmpeg()
 
     _clean_upload_dir()
     say(f"启动 main.py（当前目录：{ROOT}）")
