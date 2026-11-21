@@ -95,7 +95,8 @@ Content input
 ### 环境要求
 
 - Windows
-- Python 3.12+（推荐用 conda 环境，脚本默认环境名为 `dy`）
+- Python 3.12+（conda 可选；没有 conda 时脚本用项目内 `.venv`，没有 Python
+  时 `setup.bat` 会自动安装）
 - Node.js 22.x
 - FFmpeg（需加入 `PATH`）
 - Chrome
@@ -109,16 +110,25 @@ Content input
    cd video-mover
    ```
 
-2. 准备 conda 环境（下面命令里的 `dy` 就是默认环境名，可以换成你喜欢的名字）：
+2. 准备运行环境。不用手工做任何事，`setup.bat` 按顺序自动挑一个：
+
+   - 已有的 conda 环境（默认名 `dy`；不存在时自动 `conda create -y -n dy
+     python=3.12`）；
+   - 本机没有 conda 时，用项目内 `.venv`（首次运行自动创建）；
+   - 连 Python 3.12+ 都没有时，自动安装 Python 3.13（优先 `winget`，失败
+     则下载 python.org 官方安装包，按用户安装并加入 `PATH`）。
+
+   想固定用某个 conda 环境，先建好再指定名字：
 
    ```bash
-   conda create -y -n dy python=3.12
+   conda create -y -n dy python=3.12     # 可选
+   setup.bat dy
    ```
 
-3. 运行 `setup.bat`（当前已激活环境名不是 `dy` 时，用参数指定：`setup.bat 环境名`）。
-   它会依次执行：升级 pip → 安装 `requirements.txt` → 安装 `requirements-dev.txt`
-   → 安装 Playwright 浏览器（chromium / firefox）→ 应用上游兼容补丁 → 检查
-   `ffmpeg` / `ffprobe` 是否在 `PATH` 中。
+3. 运行 `setup.bat`（默认环境名 `dy`，已有环境名不同时用第一个参数指定）。
+   它会依次执行：确认/创建环境 → 升级 pip → 安装 `requirements.txt` →
+   安装 `requirements-dev.txt` → 安装 Playwright 浏览器（chromium / firefox）
+   → 应用上游兼容补丁 → 检查 `ffmpeg` / `ffprobe` 是否在 `PATH` 中。
 
    安装完成后想复查环境，执行：
 
@@ -235,8 +245,9 @@ Content input
 python main.py
 ```
 
-`start.bat` 会先清空 `Upload\videos` 里的历史 mp4，再启动 `main.py`。只想确认环境
-是否装好、不想真的启动时：`start.bat dy --dry-run`。
+`start.bat` 使用与 `setup.bat` 相同的查找顺序（conda 环境 `dy` → 项目 `.venv`），
+会先清空 `Upload\videos` 里的历史 mp4，再启动 `main.py`。只想确认环境是否装好、
+不想真的启动时：`start.bat dy --dry-run`。
 
 程序会自动打开浏览器并执行任务，按提示完成首次登录即可进入自动化流程。
 

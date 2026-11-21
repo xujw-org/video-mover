@@ -25,6 +25,7 @@ set "CONDA_BASE="
 for /f "delims=" %%i in ('conda info --base 2^>nul') do if not defined CONDA_BASE set "CONDA_BASE=%%i"
 if defined CONDA_BASE if exist "%CONDA_BASE%\envs\%CONDA_ENV%\python.exe" set "PY=%CONDA_BASE%\envs\%CONDA_ENV%\python.exe"
 if not defined PY if /i "%CONDA_ENV%"=="base" if defined CONDA_BASE if exist "%CONDA_BASE%\python.exe" set "PY=%CONDA_BASE%\python.exe"
+if not defined PY if /i "%CONDA_ENV%"=="dy" if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
 if not defined PY goto :no_python
 
 "%PY%" "%~dp0scripts\win_env.py" run --env "%CONDA_ENV%" %2
@@ -35,8 +36,8 @@ exit /b %EXITCODE%
 
 :no_python
 echo.
-echo [ERROR] conda environment "%CONDA_ENV%" was not found, or conda is not on PATH.
-echo         Install the environment first:
-echo             setup.bat %CONDA_ENV%
+echo [ERROR] No conda environment "%CONDA_ENV%" and no project .venv were found.
+echo         Run setup.bat first: it creates the environment and installs Python if needed.
+echo         Passing an existing conda environment name also works:  start.bat ENV_NAME
 echo.
 exit /b 1

@@ -67,7 +67,8 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 ### Requirements
 
 - Windows
-- Python 3.12+
+- Python 3.12+ (conda optional: a project `.venv` is used when conda is absent,
+  and `setup.bat` installs Python itself when none is present)
 - Node.js 22.x
 - FFmpeg available on `PATH`
 - Chrome
@@ -81,16 +82,26 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
    cd video-mover
    ```
 
-2. Create a conda environment (`dy` is the default name used by the scripts; use any name you like):
+2. Prepare the runtime. Nothing manual is required: `setup.bat` picks, in order,
+
+   - an existing conda environment (default name `dy`, created with
+     `conda create -y -n dy python=3.12` when missing);
+   - the project `.venv` when conda is not installed (created automatically);
+   - a Python 3.13 install when no Python 3.12+ exists (`winget` first, then the
+     python.org installer, per-user and added to `PATH`).
+
+   To pin a specific conda environment, create it first and pass its name:
 
    ```bash
-   conda create -y -n dy python=3.12
+   conda create -y -n dy python=3.12     # optional
+   setup.bat dy
    ```
 
 3. Run `setup.bat` (pass another environment name as the first argument if needed: `setup.bat myenv`).
-   It upgrades pip, installs `requirements.txt` and `requirements-dev.txt`, installs the
-   Playwright browsers (chromium / firefox), applies the upstream patches and then checks
-   that `ffmpeg` / `ffprobe` are on `PATH`. To re-check an existing environment:
+   It creates the environment when missing, then upgrades pip, installs
+   `requirements.txt` and `requirements-dev.txt`, installs the Playwright
+   browsers, applies upstream patches, and checks `ffmpeg` / `ffprobe`.
+   To re-check an existing environment:
 
    ```bash
    python scripts/win_env.py check --env dy
@@ -134,8 +145,10 @@ Double-click `start.bat` (or `start.bat env-name` from a shell), or execute dire
 python main.py
 ```
 
-`start.bat` clears the historical mp4 files in `Upload\videos` and then starts `main.py`.
-To only verify the environment without starting: `start.bat dy --dry-run`.
+`start.bat` resolves the interpreter the same way `setup.bat` does (conda env `dy`,
+then the project `.venv`), clears the historical mp4 files in `Upload\videos` and
+then starts `main.py`. To only verify the environment without starting:
+`start.bat dy --dry-run`.
 
 The program opens a browser and starts the tasks; complete the first login as prompted, then the pipeline runs automatically.
 

@@ -15,6 +15,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -122,11 +123,112 @@ def test_resolve_interpreter_returns_none_when_absent(monkeypatch):
 
 def test_require_interpreter_exits_with_hint(monkeypatch, capsys):
     monkeypatch.setattr(win_env, "resolve_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "venv_python", lambda: Path("/nonexistent/python"))
+    monkeypatch.setattr(win_env, "_conda_available", lambda: True)
+    monkeypatch.setattr(win_env, "_existing_env_names", lambda: ["dy", "py312"])
     with pytest.raises(SystemExit) as excinfo:
         win_env.require_interpreter("dy")
     assert excinfo.value.code == 1
     out = capsys.readouterr().out
     assert "conda create -y -n dy python=3.12" in out
+    assert "setup.bat 环境名" in out
+
+
+def test_find_interpreter_falls_back_to_venv(tmp_path, monkeypatch):
+    fake = tmp_path / ".venv" / "Scripts" / EXE_NAME
+    fake.parent.mkdir(parents=True)
+    fake.write_bytes(b"")
+    monkeypatch.setattr(win_env, "resolve_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "venv_python", lambda: fake)
+    assert win_env.find_interpreter("dy") == fake
+
+
+def test_find_interpreter_ignores_venv_for_custom_env(tmp_path, monkeypatch):
+    fake = tmp_path / ".venv" / "Scripts" / EXE_NAME
+    fake.parent.mkdir(parents=True)
+    fake.write_bytes(b"")
+    monkeypatch.setattr(win_env, "resolve_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "venv_python", lambda: fake)
+    assert win_env.find_interpreter("py312") is None
+
+
+def test_ensure_interpreter_creates_missing_conda_env(monkeypatch, capsys):
+    """机器上有 conda 但没有 dy 时，setup 直接 conda create。"""
+    interpreter = REPO_ROOT / ".nonexistent" / EXE_NAME
+    recorded = []
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "resolve_interpreter", lambda env: interpreter)
+    monkeypatch.setattr(win_env, "_conda_available", lambda: True)
+    monkeypatch.setattr(win_env, "run", lambda cmd: recorded.append(cmd) or 0)
+
+    assert win_env.ensure_interpreter("dy") == interpreter
+    assert recorded == [["conda", "create", "-y", "-n", "dy", "python=3.12"]]
+    out = capsys.readouterr().out
+    assert "自动创建" in out and "创建完成" in out
+
+
+def test_ensure_interpreter_creates_venv_without_conda(tmp_path, monkeypatch, capsys):
+    """没有 conda 时改用项目 .venv，不再要求用户先安装 conda。"""
+    venv = tmp_path / ".venv" / "Scripts" / EXE_NAME
+    venv.parent.mkdir(parents=True)
+    venv.write_bytes(b"")
+    recorded = []
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "_conda_available", lambda: False)
+    monkeypatch.setattr(win_env, "venv_python", lambda: venv)
+    monkeypatch.setattr(win_env, "run", lambda cmd: recorded.append(cmd) or 0)
+    monkeypatch.setattr(win_env, "ROOT", tmp_path)
+
+    assert win_env.ensure_interpreter("dy") == venv
+    assert recorded == [[sys.executable, "-m", "venv", str(tmp_path / ".venv")]]
+    out = capsys.readouterr().out
+    assert "没有 conda" in out and "创建完成" in out
+
+
+def test_ensure_interpreter_requires_conda_for_custom_env(monkeypatch, capsys):
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "_conda_available", lambda: False)
+    monkeypatch.setattr(win_env, "run", lambda cmd: pytest.fail("不应创建任何环境"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        win_env.ensure_interpreter("py312")
+    assert excinfo.value.code == 1
+    assert "需要 conda" in capsys.readouterr().out
+
+
+def test_ensure_interpreter_skips_creation_when_env_exists(monkeypatch):
+    interpreter = REPO_ROOT / ".nonexistent" / EXE_NAME
+    calls = []
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: interpreter)
+    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(cmd) or 0)
+
+    assert win_env.ensure_interpreter("dy") == interpreter
+    assert calls == []
+
+
+def test_ensure_interpreter_reports_create_failure(monkeypatch, capsys):
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "_conda_available", lambda: True)
+    monkeypatch.setattr(win_env, "run", lambda cmd: 1)
+
+    with pytest.raises(SystemExit) as excinfo:
+        win_env.ensure_interpreter("dy")
+    assert excinfo.value.code == 1
+    out = capsys.readouterr().out
+    assert "自动创建失败" in out
+    assert "conda create -y -n dy python=3.12" in out
+
+
+def test_ensure_interpreter_never_creates_base(monkeypatch):
+    monkeypatch.setattr(win_env, "find_interpreter", lambda env: None)
+    monkeypatch.setattr(win_env, "_conda_available", lambda: True)
+    monkeypatch.setattr(win_env, "_existing_env_names", lambda: ["base"])
+    calls = []
+    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(cmd) or 0)
+
+    with pytest.raises(SystemExit):
+        win_env.ensure_interpreter("base")
+    assert calls == []
 
 
 # --------------------------------------------------------------------------

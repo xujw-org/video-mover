@@ -20,7 +20,8 @@
     python scripts/win_env.py run    [--env NAME] [--dry-run]
     python scripts/win_env.py check  [--env NAME]
 
-  setup  按 requirements 安装依赖、装 Playwright 浏览器、打上游补丁
+  setup  确认环境（缺失时自动创建 conda 环境或 .venv）→ 安装依赖、装 Playwright
+         浏览器、打上游补丁；Python 解释器本身由 setup.bat 负责装
   run    清理待上传目录并启动 main.py
   check  只检查不修改：解释器、依赖、ffmpeg、Playwright 浏览器、补丁、资产
 """
@@ -135,16 +136,130 @@ def resolve_interpreter(env_name: str) -> Path | None:
     return None
 
 
-def require_interpreter(env_name: str) -> Path:
+def _conda_available() -> bool:
+    return shutil.which("conda") is not None
+
+
+def _existing_env_names() -> list[str]:
+    """conda env list 里的环境名（探测失败返回空列表，不影响主流程）。"""
+    code, out = run_captured(["conda", "env", "list"])
+    if code != 0:
+        return []
+    names: list[str] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 2:
+            names.append(fields[0].lstrip("*"))
+    return names
+
+
+def venv_python() -> Path:
+    """项目内虚拟环境的解释器路径（与 start.bat / setup.bat 的查找顺序一致）。"""
+    scripts = "Scripts" if os.name == "nt" else "bin"
+    exe = "python.exe" if os.name == "nt" else "python"
+    return ROOT / ".venv" / scripts / exe
+
+
+def find_interpreter(env_name: str) -> Path | None:
+    """运行期解析：conda 环境优先，没有 conda 时退回项目内 .venv。
+
+    只在默认环境名上退回 .venv；显式指定别的环境名时不猜。
+    """
     interpreter = resolve_interpreter(env_name)
+    if interpreter is not None:
+        return interpreter
+    if env_name == DEFAULT_ENV and venv_python().is_file():
+        return venv_python()
+    return None
+
+
+def explain_missing_env(env_name: str) -> None:
+    """环境缺失时打印可执行的下一步，区分“conda 没装”和“环境没建”。"""
+    say()
+    say(f"[错误] 找不到环境 “{env_name}” 的 Python。")
+    if _conda_available():
+        existing = _existing_env_names()
+        if existing:
+            say(f"        当前已有的 conda 环境：{', '.join(existing)}")
+            say("        用已有环境安装：setup.bat 环境名")
+        say("        setup.bat 会自动创建缺失的 conda 环境。")
+    else:
+        say("        本机没有 conda：默认环境 dy 会使用项目内 .venv；")
+        say("        连 Python 3.12+ 都没有时，会自动下载并安装 Python。")
+        if env_name != DEFAULT_ENV:
+            say(f"        自定义环境名 “{env_name}” 需要 conda，请先安装 Miniconda/Anaconda。")
+    say(f"        手动创建 conda 环境：conda create -y -n {env_name} python=3.12")
+
+
+def require_interpreter(env_name: str) -> Path:
+    interpreter = find_interpreter(env_name)
     if interpreter is None:
-        say()
-        say(f"[错误] 找不到 conda 环境 “{env_name}” 的 Python。")
-        say("        先创建环境，再重新运行：")
-        say(f"          conda create -y -n {env_name} python=3.12")
-        say("        环境名不是 “%s” 时，用参数指定：setup.bat 环境名" % env_name)
+        explain_missing_env(env_name)
         raise SystemExit(1)
     return interpreter
+
+
+NEW_ENV_PYTHON = "3.12"
+
+
+def _create_conda_env(env_name: str) -> Path:
+    say()
+    say(f"[环境] “{env_name}” 不存在，自动创建："
+        f"conda create -y -n {env_name} python={NEW_ENV_PYTHON}")
+    if run(["conda", "create", "-y", "-n", env_name, f"python={NEW_ENV_PYTHON}"]) != 0:
+        say()
+        say("[错误] 自动创建失败（网络 / 镜像 / conda 服务条款未接受等）。请手动执行：")
+        say(f"          conda create -y -n {env_name} python={NEW_ENV_PYTHON}")
+        raise SystemExit(1)
+
+    interpreter = resolve_interpreter(env_name)
+    if interpreter is None:
+        explain_missing_env(env_name)
+        raise SystemExit(1)
+    say(f"[环境] 创建完成：{interpreter}")
+    return interpreter
+
+
+def _create_venv() -> Path:
+    target = ROOT / ".venv"
+    say()
+    say(f"[环境] 没有 conda，改用项目内虚拟环境：{target}")
+    say(f"        基础解释器：{sys.executable}")
+    if run([sys.executable, "-m", "venv", str(target)]) != 0:
+        say()
+        say("[错误] 创建 .venv 失败。请手动执行：python -m venv .venv")
+        raise SystemExit(1)
+
+    interpreter = venv_python()
+    if not interpreter.is_file():
+        say()
+        say(f"[错误] .venv 已创建，但找不到解释器：{interpreter}")
+        raise SystemExit(1)
+    say(f"[环境] 创建完成：{interpreter}")
+    return interpreter
+
+
+def ensure_interpreter(env_name: str) -> Path:
+    """setup 专用：环境不存在时自动补齐，而不是让用户手工建。
+
+    顺序：conda 环境 -> 项目内 .venv -> 新建 conda 环境（有 conda 时）
+          -> 新建 .venv（没有 conda，且用的是默认环境名）。
+    """
+    interpreter = find_interpreter(env_name)
+    if interpreter is not None:
+        return interpreter
+    if env_name == "base":
+        explain_missing_env(env_name)
+        raise SystemExit(1)
+    if _conda_available():
+        return _create_conda_env(env_name)
+    if env_name == DEFAULT_ENV:
+        return _create_venv()
+    explain_missing_env(env_name)
+    raise SystemExit(1)
 
 
 # --------------------------------------------------------------------------
@@ -165,7 +280,7 @@ REQUIRED_IMPORTS = [
 def cmd_check(args: argparse.Namespace) -> int:
     interpreter = require_interpreter(args.env)
     say("=" * 62)
-    say(f"conda 环境：{args.env}")
+    say(f"环境      ：{args.env}")
     say(f"解释器    ：{interpreter}")
 
     code, out = run_captured([str(interpreter), "-c", "import sys;print(sys.version.split()[0])"])
@@ -220,9 +335,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 # setup：安装
 # --------------------------------------------------------------------------
 def cmd_setup(args: argparse.Namespace) -> int:
-    interpreter = require_interpreter(args.env)
+    interpreter = ensure_interpreter(args.env)
     say("=" * 62)
-    say(f"目标环境：conda {args.env}")
+    say(f"目标环境：{args.env}")
     say(f"解释器  ：{interpreter}")
     say("=" * 62)
 
@@ -305,7 +420,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if code != 0:
         say()
         say(f"[错误] 环境 “{args.env}” 缺少依赖（psutil / apscheduler / watchdog）。")
-        say(f"        请先运行：setup.bat {args.env}")
+        say(f"        请先运行：setup.bat {args.env}（环境缺失时它会自动创建）")
         return 1
 
     say(f"使用解释器：{interpreter}")
