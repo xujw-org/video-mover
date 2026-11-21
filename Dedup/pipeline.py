@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -58,6 +59,30 @@ except ImportError:  # 作为顶层模块直接导入时（见 Dedup/dedup.py �
     from filters import VideoEffects
     from subtitles import SubtitleHandler
     from workspace import temp_wav
+
+
+def _ffmpeg_exe() -> str:
+    return os.environ.get("FFMPEG_BIN") or "ffmpeg"
+
+
+def _soxr_available() -> bool:
+    """ffmpeg 构建里是否带 libsoxr。
+
+    gyan.dev 的 essentials 构建没有 soxr；滤镜里写 ``resampler=soxr`` 会让
+    aresample 初始化失败（``Requested resampling engine is unavailable``），
+    表现为 BrokenPipeError + 去重失败。用一次极短的空跑探测，没有就退回
+    默认的 swr。
+    """
+    cmd = [
+        _ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+        "-i", "sine=frequency=1000:duration=0.01",
+        "-af", "aresample=resampler=soxr", "-f", "null", "-",
+    ]
+    try:
+        completed = subprocess.run(cmd, capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 class VideoHandler:
@@ -275,9 +300,14 @@ class VideoHandler:
         if config.pitch_shift != 1.0 and sample_rate:
             new_rate = int(sample_rate * config.pitch_shift)
             # asetrate 同时改采样率和音调，接着 aresample 回原采样率；
-            # 显式指定 soxr，重建误差比默认 swr 更小。
+            # 有 soxr 就用它（重建误差更小），没有就退回默认 swr —— 写死
+            # resampler=soxr 会在不含 libsoxr 的 ffmpeg 构建上直接初始化失败。
             stream = stream.filter('asetrate', new_rate)
-            stream = stream.filter('aresample', int(sample_rate), resampler='soxr')
+            if _soxr_available():
+                stream = stream.filter('aresample', int(sample_rate), resampler='soxr')
+            else:
+                logging.debug("ffmpeg 构建不含 soxr，aresample 使用默认 swr")
+                stream = stream.filter('aresample', int(sample_rate))
             pitch_applied = True
         tempo = config.playback_speed / config.pitch_shift if pitch_applied \
             else config.playback_speed

@@ -17,6 +17,7 @@ import sys
 import numpy as np
 import pytest
 
+from Dedup import pipeline as pipeline_module
 from Dedup.config import VideoConfig
 from Dedup.pipeline import VideoHandler
 from tests.helpers import _passing_video_config
@@ -92,7 +93,8 @@ def test_audio_effects_speed_only_uses_atempo():
     assert _filters(ffmpeg) == [("filter", ("atempo", 1.05), {}), LIMITER]
 
 
-def test_audio_effects_pitch_only():
+def test_audio_effects_pitch_only(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_soxr_available", lambda: True)
     ffmpeg = sys.modules["ffmpeg"]
     ffmpeg.calls.clear()
     stream = ffmpeg.input("x.wav")
@@ -109,7 +111,43 @@ def test_audio_effects_pitch_only():
     ]
 
 
-def test_audio_effects_pitch_and_speed_combined():
+def test_audio_effects_pitch_falls_back_to_swr_without_soxr(monkeypatch):
+    """gyan essentials 构建没有 soxr：aresample 不能带 resampler=soxr。"""
+    monkeypatch.setattr(pipeline_module, "_soxr_available", lambda: False)
+    ffmpeg = sys.modules["ffmpeg"]
+    ffmpeg.calls.clear()
+    stream = ffmpeg.input("x.wav")
+    config = VideoConfig()
+    config.pitch_shift = 1.02
+    VideoHandler._apply_audio_effects(stream, config, 48000)
+    assert _filters(ffmpeg) == [
+        ("filter", ("asetrate", 48960), {}),
+        ("filter", ("aresample", 48000), {}),
+        ("filter", ("atempo", 0.9804), {}),
+        LIMITER,
+    ]
+
+
+def test_soxr_probe_follows_ffmpeg_exit_code(monkeypatch):
+    class Completed:
+        returncode = 0
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(pipeline_module.subprocess, "run", fake_run)
+    assert pipeline_module._soxr_available() is True
+    assert "aresample=resampler=soxr" in calls[0]
+
+    Completed.returncode = 1
+    assert pipeline_module._soxr_available() is False
+
+
+def test_audio_effects_pitch_and_speed_combined(monkeypatch):
+    monkeypatch.setattr(pipeline_module, "_soxr_available", lambda: True)
     ffmpeg = sys.modules["ffmpeg"]
     ffmpeg.calls.clear()
     stream = ffmpeg.input("x.wav")
