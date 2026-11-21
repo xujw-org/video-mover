@@ -150,6 +150,34 @@ def test_run_captured_returns_124_on_timeout():
 
 
 # --------------------------------------------------------------------------
+# 子进程 PATH：venv / conda 未激活时也要能调到 f2
+# --------------------------------------------------------------------------
+def test_env_with_scripts_prepends_venv_dir(tmp_path, monkeypatch):
+    interpreter = tmp_path / "Scripts" / "python.exe"
+    monkeypatch.setenv("PATH", "C:\\Windows")
+    env = win_env.env_with_scripts(interpreter)
+    assert env["PATH"].split(os.pathsep)[0] == str(interpreter.parent)
+
+
+def test_env_with_scripts_covers_conda_layout(tmp_path, monkeypatch):
+    (tmp_path / "Scripts").mkdir()
+    interpreter = tmp_path / "python.exe"
+    monkeypatch.setenv("PATH", "C:\\Windows")
+    entries = win_env.env_with_scripts(interpreter)["PATH"].split(os.pathsep)
+    assert str(tmp_path) in entries[:2]
+    assert str(tmp_path / "Scripts") in entries[:2]
+
+
+def test_env_with_scripts_does_not_duplicate_entries(tmp_path, monkeypatch):
+    (tmp_path / "Scripts").mkdir()
+    interpreter = tmp_path / "python.exe"
+    existing = os.pathsep.join([str(tmp_path / "Scripts"), "C:\\Windows"])
+    monkeypatch.setenv("PATH", existing)
+    entries = win_env.env_with_scripts(interpreter)["PATH"].split(os.pathsep)
+    assert entries.count(str(tmp_path / "Scripts")) == 1
+
+
+# --------------------------------------------------------------------------
 # 解释器解析
 # --------------------------------------------------------------------------
 def _make_env(base, env_name):

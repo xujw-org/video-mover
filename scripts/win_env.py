@@ -489,6 +489,28 @@ def _clean_upload_dir() -> None:
             say(f"  [警告] 删除失败 {video.name}：{exc}")
 
 
+def env_with_scripts(interpreter: Path) -> dict[str, str]:
+    """子进程环境：把解释器目录（以及 Windows 下 conda 的 Scripts）放到 PATH 最前面。
+
+    直接调用 venv / conda 的 python（不 activate）时，该环境的 Scripts 目录不在
+    PATH 里，main.py 里 `subprocess.Popen(["f2", ...])` 会 WinError 2。
+    venv 的 python 本身就在 Scripts；conda 的 python 在环境根目录，脚本在 Scripts 下。
+    """
+    env = os.environ.copy()
+    base = Path(interpreter).parent
+    scripts = [str(base)]
+    if os.name == "nt" and (base / "Scripts").is_dir():
+        scripts.insert(0, str(base / "Scripts"))
+
+    existing = env.get("PATH", "")
+    entries = existing.split(os.pathsep) if existing else []
+    lowered = {entry.lower() for entry in entries}
+    missing = [path for path in reversed(scripts) if path.lower() not in lowered]
+    if missing:
+        env["PATH"] = os.pathsep.join(missing + ([existing] if existing else []))
+    return env
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     interpreter = require_interpreter(args.env)
 
@@ -508,7 +530,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     say(f"启动 main.py（当前目录：{ROOT}）")
     say("-" * 62)
     try:
-        return subprocess.run([str(interpreter), str(ROOT / "main.py")], cwd=str(ROOT)).returncode
+        return subprocess.run(
+            [str(interpreter), str(ROOT / "main.py")],
+            cwd=str(ROOT),
+            env=env_with_scripts(interpreter),
+        ).returncode
     except KeyboardInterrupt:
         say()
         say("已中断，正在退出。")

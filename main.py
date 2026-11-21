@@ -5,6 +5,7 @@ import signal
 import psutil
 import logging
 import subprocess
+import shutil
 import douyin_fetch
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -108,6 +109,34 @@ def _ensure_mode(f2_command: list) -> list:
         return command
     logging.info("f2 命令未指定 -M/--mode，已补默认值 post（按主页作品抓取）")
     return command + ["-M", "post"]
+
+
+def _resolve_executable_command(command: list) -> list:
+    """把 PATH 里找不到的命令解析到当前解释器所在目录。
+
+    用 start.bat 直接调用 venv / conda 的 python（不 activate）时，PATH 里没有
+    该环境的 Scripts 目录，`subprocess.Popen(["f2", ...])` 会抛 WinError 2。
+    console script（f2.exe）就装在解释器旁边，这里补一次解析。
+    """
+    if not command:
+        return command
+    name = str(command[0])
+    if shutil.which(name):
+        return command
+    if os.path.sep in name or (os.altsep and os.altsep in name):
+        return command
+    exe_dir = Path(sys.executable).resolve().parent
+    # venv 的 python 就在 Scripts 里；conda 的 python 在环境根目录，脚本在 Scripts 下。
+    search_dirs = [exe_dir]
+    if os.name == "nt":
+        search_dirs.append(exe_dir / "Scripts")
+    suffixes = [".exe", ".bat", ".cmd", ""] if os.name == "nt" else [""]
+    for directory in search_dirs:
+        for suffix in suffixes:
+            candidate = directory / f"{name}{suffix}"
+            if candidate.is_file():
+                return [str(candidate), *(str(x) for x in command[1:])]
+    return command
 
 # 环境变量名前缀：环境变量优先于 my_apps.yaml，优先于内置默认值。
 ENV_PREFIX = "VIDEO_MOVER_"
@@ -773,17 +802,26 @@ class MainCommandHandler(HandlerBase):
     def _run_command(self, command: list) -> tuple[bool, bool]:
         """执行一条 f2 抓取命令，返回 (成功, 是否命中 403 Forbidden)。"""
         logging.info(f"\n{'='*35}\n开始执行主命令 - 时间: {datetime.now(ZoneInfo(self.config.TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')}")
-        self.current_process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,          # 捕获标准输出
-            stderr=subprocess.STDOUT,        # 将标准错误合并到标准输出
-            text=True,                       # 以文本模式读取
-            encoding='utf-8',                # 子进程输出按 UTF-8 解码；
-            errors='replace',                # 美区 Windows 默认是 cp1252，
-            bufsize=1,                       # 不加这句中文输出会解码失败
-            universal_newlines=True,         # 跨平台换行符处理
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-        )
+        command = _resolve_executable_command(command)
+        try:
+            self.current_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,          # 捕获标准输出
+                stderr=subprocess.STDOUT,        # 将标准错误合并到标准输出
+                text=True,                       # 以文本模式读取
+                encoding='utf-8',                # 子进程输出按 UTF-8 解码；
+                errors='replace',                # 美区 Windows 默认是 cp1252，
+                bufsize=1,                       # 不加这句中文输出会解码失败
+                universal_newlines=True,         # 跨平台换行符处理
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+            )
+        except FileNotFoundError as exc:
+            logging.error(
+                f"找不到可执行文件 {command[0]!r}（{exc}）。\n"
+                f"        当前解释器：{sys.executable}\n"
+                f"        确认已运行 setup.bat；或用 start.bat 启动（会把解释器目录加入 PATH）。"
+            )
+            return False, False
         forbidden_found = False
         while True:
             output = self.current_process.stdout.readline()
