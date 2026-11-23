@@ -176,6 +176,11 @@ On a machine that has already been cloned, double-click `update.bat` (or
 2. setup again: dependencies, Playwright, upstream patches, ffmpeg;
 3. download missing binary assets (existing files are skipped).
 
+Environment discovery matches `setup.bat`: a conda env first, then the project
+`.venv`, then conda base. If none exists, `scripts/bootstrap_python.ps1` installs
+Python 3.12+ and a `.venv` is created, so a PC without Python can run this script
+directly.
+
 If the pull fails because of local modifications, divergent branches or network
 problems, the script stops immediately and does not touch dependencies.
 Start with `gui.bat` or `start.bat` afterwards.

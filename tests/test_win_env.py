@@ -101,30 +101,21 @@ def test_update_flags():
 
 def test_update_pulls_then_runs_setup_and_assets(monkeypatch):
     calls = []
-    monkeypatch.setattr(win_env, "require_interpreter", lambda env: Path("python"))
+    monkeypatch.setattr(win_env, "ensure_interpreter", lambda env: Path("python"))
     monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 0)
 
-    def fake_setup(args):
-        calls.append(["setup", args.env])
-        return 0
-
-    monkeypatch.setattr(win_env, "cmd_setup", fake_setup)
     assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
     assert calls[0] == ["git", "pull", "--ff-only"]
-    assert ["setup", "dy"] in calls
+    setup = [cmd for cmd in calls if any(str(part).endswith("win_env.py") for part in cmd)]
+    assert setup and "setup" in setup[0] and "--env" in setup[0] and "dy" in setup[0]
     assert any("download_assets.py" in str(cmd) for cmd in calls)
 
 
 def test_update_stops_when_git_pull_fails(monkeypatch):
     calls = []
-    monkeypatch.setattr(win_env, "require_interpreter", lambda env: Path("python"))
+    monkeypatch.setattr(win_env, "ensure_interpreter", lambda env: Path("python"))
     monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 1)
 
-    def fake_setup(args):
-        calls.append(["setup", args.env])
-        return 0
-
-    monkeypatch.setattr(win_env, "cmd_setup", fake_setup)
     assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
     assert calls == [["git", "pull", "--ff-only"]]
 

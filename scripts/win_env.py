@@ -732,8 +732,12 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 
 def cmd_update(args: argparse.Namespace) -> int:
-    """拉取最新代码，再走一遍 setup（依赖/补丁/ffmpeg），最后补素材。"""
-    interpreter = require_interpreter(args.env)
+    """拉取最新代码，再走一遍 setup（依赖/补丁/ffmpeg），最后补素材。
+
+    注意：setup 必须用子进程重新执行 ``scripts/win_env.py``。``git pull`` 可能
+    刚更新了这个文件本身，继续在当前进程里调用 ``cmd_setup`` 用的仍是旧代码。
+    """
+    interpreter = ensure_interpreter(args.env)
     say("=" * 62)
     say(f"更新代码：{ROOT}")
     say("=" * 62)
@@ -747,8 +751,14 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     say()
     say("代码已更新，开始检查依赖、Playwright、上游补丁和 ffmpeg ...")
-    setup_args = argparse.Namespace(env=args.env, torch="auto", with_assets=False)
-    if cmd_setup(setup_args) != 0:
+    setup_cmd = [
+        str(interpreter),
+        str(ROOT / "scripts" / "win_env.py"),
+        "setup",
+        "--env",
+        args.env,
+    ]
+    if run(setup_cmd) != 0:
         return 1
 
     say()

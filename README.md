@@ -281,6 +281,10 @@ Content input
 2. 重跑 setup：检查/安装依赖、Playwright、上游补丁、ffmpeg；
 3. 补下缺失的大二进制素材（已有的会跳过）。
 
+环境识别与 `setup.bat` 一致：优先 conda 环境，其次项目 `.venv`，再退到 conda
+base；三者都没有时会用 `scripts/bootstrap_python.ps1` 自动安装 Python 3.12+，
+再创建 `.venv`。所以换一台没装 Python 的电脑也能直接双击这个脚本。
+
 如果 pull 因为本机有未提交修改、分支分叉或网络问题失败，脚本会立即停下并提示，
 不会继续改依赖。更新完成后用 `gui.bat` 或 `start.bat` 启动。
 
