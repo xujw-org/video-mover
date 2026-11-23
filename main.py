@@ -700,9 +700,19 @@ class FileManager(HandlerBase):
         output_dir = self.config.UPLOAD_DIR / 'videos'
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file = output_dir / input_file.name
+        if output_file.is_file() and output_file.stat().st_size > 0:
+            logging.info(f"已有待上传成品，跳过重复处理: {input_file.name}")
+            return True
+        temp_dir = output_dir / '.tmp'
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_output = temp_dir / input_file.name
+        try:
+            temp_output.unlink(missing_ok=True)
+        except OSError:
+            pass
         try:
             process = subprocess.Popen(
-                [sys.executable, str(self.config.DEDUP_SCRIPT), "-i", str(input_file), "-o", str(output_file)],
+                [sys.executable, str(self.config.DEDUP_SCRIPT), "-i", str(input_file), "-o", str(temp_output)],
                 cwd=self.config.DEDUP_DIR,
                 stdout=None,
                 stderr=None,
@@ -710,13 +720,22 @@ class FileManager(HandlerBase):
             )
             process.wait()
             if process.returncode == 0:
+                temp_output.replace(output_file)
                 logging.info(f"已去重并导出: {input_file.name}")
                 return True
             else:
                 logging.error(f"去重失败: {input_file.name}，返回码: {process.returncode}")
+                try:
+                    temp_output.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return False
         except Exception as e:
             logging.error(f"处理视频失败: {input_file.name} -> {e}")
+            try:
+                temp_output.unlink(missing_ok=True)
+            except OSError:
+                pass
             return False
 
     def run(self) -> bool:

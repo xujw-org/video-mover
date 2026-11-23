@@ -337,7 +337,7 @@ def index() -> None:
             await nicegui_run.io_bound(MANAGER.stop, 12.0)
             if not connected():
                 return
-        ok, message = await nicegui_run.io_bound(MANAGER.start_main, True)
+        ok, message = await nicegui_run.io_bound(MANAGER.start_main)
         if not connected():
             return
         ui.notify(message, type="positive" if ok else "negative")
@@ -354,7 +354,7 @@ def index() -> None:
         # 启动前把界面上的最新改动写盘，避免“改了没保存，启动的却是旧配置”。
         if not await save_config(show_ok=False) or not connected():
             return
-        ok, message = await nicegui_run.io_bound(MANAGER.start_main, True)
+        ok, message = await nicegui_run.io_bound(MANAGER.start_main)
         if not connected():
             return
         ui.notify(message, type="positive" if ok else "negative")
@@ -612,7 +612,8 @@ def index() -> None:
                 )
                 ui.separator()
                 ui.label(
-                    "启动前会清空 Upload/videos 里的历史 mp4（与 start.bat 一致，防止重复发布）。"
+                    "已处理但未上传的成品会保留在 Upload/videos，下次启动直接上传；"
+                    "同名成品已存在时跳过重复处理。"
                 ).classes("text-xs text-gray-500")
 
             with ui.card().classes("w-full"):
@@ -946,7 +947,8 @@ def index() -> None:
 
 ### 注意
 
-- 启动前会删除 `Upload/videos` 里的历史 mp4（与 `start.bat` 一致），防止重复发布。
+- 已处理但未上传的成品会保留在 `Upload/videos`，下次启动直接上传；同名成品存在时
+  跳过重复处理，不会因为停止而丢掉待上传内容。
 - 日志按“最新在上”显示；每次启动流水线会清空本次输出，旧 `app.log` 备份为
   `app.log.prev`，不会和上一轮业务混在一起。
 - 关掉启动 `gui.bat` 的控制台窗口时，子进程会随 Windows Job Object 一起结束；

@@ -515,33 +515,6 @@ def test_ensure_interpreter_never_creates_base(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# 启动前的目录清理
-# --------------------------------------------------------------------------
-def test_clean_upload_dir_only_removes_mp4(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(win_env, "ROOT", tmp_path)
-    videos = tmp_path / "Upload" / "videos"
-    videos.mkdir(parents=True)
-    (videos / "a.mp4").write_bytes(b"x")
-    (videos / "b.mp4").write_bytes(b"x")
-    keep = videos / "keep.txt"
-    keep.write_bytes(b"x")
-
-    win_env._clean_upload_dir()
-
-    assert sorted(p.name for p in videos.iterdir()) == ["keep.txt"]
-    assert "删除 2 个历史 mp4" in capsys.readouterr().out
-
-
-def test_clean_upload_dir_is_quiet_when_empty(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(win_env, "ROOT", tmp_path)
-    win_env._clean_upload_dir()  # 目录不存在
-    assert capsys.readouterr().out == ""
-    (tmp_path / "Upload" / "videos").mkdir(parents=True)
-    win_env._clean_upload_dir()  # 目录存在但没有 mp4
-    assert capsys.readouterr().out == ""
-
-
-# --------------------------------------------------------------------------
 # 脚本自身可执行（帮助信息）
 # --------------------------------------------------------------------------
 def test_help_runs():

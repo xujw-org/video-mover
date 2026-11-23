@@ -74,20 +74,6 @@ def _now_text() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def clean_upload_dir(root: Path) -> int:
-    """与 start.bat 一致：启动前删除 Upload/videos 里的历史 mp4，防止重复发布。"""
-    target = root / "Upload" / "videos"
-    if not target.is_dir():
-        return 0
-    removed = 0
-    for video in target.glob("*.mp4"):
-        try:
-            video.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
-
 
 def tail_file(path: Path, max_lines: int = 500, max_bytes: int = 512 * 1024) -> list[str]:
     """读取日志文件末尾若干行；不存在返回空列表。"""
@@ -333,9 +319,7 @@ class ProcessManager:
         else:
             self.log.add(f"[{_now_text()}] 已清空上一轮日志")
 
-    def start_main(
-        self, clean_upload: bool = True, reset_logs: bool = True
-    ) -> tuple[bool, str]:
+    def start_main(self, reset_logs: bool = True) -> tuple[bool, str]:
         if self.busy():
             return False, f"已有任务在运行（{self._label}），请先停止。"
         external = self.find_external_main(max_age=0)
@@ -350,13 +334,6 @@ class ProcessManager:
             return False, "缺少 my_apps.yaml，请先在“配置”页保存。"
         if reset_logs:
             self.reset_logs()
-        if clean_upload:
-            removed = clean_upload_dir(self.root)
-            if removed:
-                self.log.add(
-                    f"[{_now_text()}] 已清理 Upload/videos 里 {removed} 个历史 mp4"
-                    "（与 start.bat 一致）"
-                )
         ok = self._spawn("main", "流水线", [sys.executable, str(self.root / "main.py")], self.root)
         if ok:
             return True, "已启动流水线，首轮任务会立即执行。"

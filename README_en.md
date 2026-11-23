@@ -159,7 +159,8 @@ Notes:
 
 - It listens on `127.0.0.1` only; launching `gui.bat` again opens the existing page.
 - Saved config is not hot-reloaded; use “Save & Restart”.
-- Starting from the GUI clears historical mp4s in `Upload/videos`, same as `start.bat`.
+- Processed-but-not-yet-uploaded mp4s are kept in `Upload/videos`; the next run
+  uploads them directly and skips reprocessing when a matching output already exists.
 - Closing the launcher console stops the pipeline. Child processes are bound to a
   Windows Job Object, so the GUI process exit also terminates `main.py`; if an
   external `main.py` is still detected, the status card offers a force-kill button.

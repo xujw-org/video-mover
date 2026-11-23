@@ -59,6 +59,10 @@ class _FakePopen:
         self.kwargs = kwargs
         self.returncode = 0
         _FakePopen.instances.append(self)
+        if "-o" in args:
+            out = Path(args[args.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"processed")
 
     def wait(self):
         return self.returncode
@@ -74,13 +78,28 @@ def test_process_video_calls_dedup_cli(file_manager, tmp_path, monkeypatch):
     proc = _FakePopen.instances[-1]
     assert proc.args[0] == sys.executable
     assert proc.args[1] == str(cfg.DEDUP_SCRIPT)
-    assert proc.args[2:] == ["-i", str(input_file), "-o", str(cfg.UPLOAD_DIR / "videos" / "clip.mp4")]
+    temp_output = cfg.UPLOAD_DIR / "videos" / ".tmp" / "clip.mp4"
+    assert proc.args[2:] == ["-i", str(input_file), "-o", str(temp_output)]
     assert proc.kwargs.get("cwd") == cfg.DEDUP_DIR
-    assert (cfg.UPLOAD_DIR / "videos").is_dir()
+    assert (cfg.UPLOAD_DIR / "videos" / "clip.mp4").is_file()
+    assert not temp_output.exists()
+
+
+def test_process_video_skips_existing_pending_output(file_manager, tmp_path, monkeypatch):
+    manager, cfg = file_manager
+    videos = cfg.UPLOAD_DIR / "videos"
+    videos.mkdir(parents=True, exist_ok=True)
+    (videos / "clip.mp4").write_bytes(b"already-processed")
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.append((a, k)))
+    input_file = tmp_path / "clip.mp4"
+    input_file.write_bytes(b"fake")
+    assert manager._process_video(input_file) is True
+    assert calls == []
 
 
 def test_process_video_nonzero_exit_returns_false(file_manager, tmp_path, monkeypatch):
-    manager, _ = file_manager
+    manager, cfg = file_manager
 
     class _FailPopen(_FakePopen):
         def __init__(self, args, **kwargs):
@@ -91,6 +110,8 @@ def test_process_video_nonzero_exit_returns_false(file_manager, tmp_path, monkey
     input_file = tmp_path / "clip.mp4"
     input_file.write_bytes(b"fake")
     assert manager._process_video(input_file) is False
+    assert not (cfg.UPLOAD_DIR / "videos" / "clip.mp4").exists()
+    assert not (cfg.UPLOAD_DIR / "videos" / ".tmp" / "clip.mp4").exists()
 
 
 def test_get_video_files_supports_f2_nested_layout(file_manager, tmp_path):

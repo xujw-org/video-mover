@@ -24,7 +24,7 @@
 
   setup  确认环境（缺失时自动创建 conda 环境或 .venv）→ 安装依赖、装 Playwright
          浏览器、打上游补丁；Python 解释器本身由 setup.bat 负责装
-  run    清理待上传目录并启动 main.py
+  run    启动 main.py（保留 Upload/videos 里待上传的成品）
   gui    启动 NiceGUI 图形控制台（缺依赖时自动安装 requirements-gui.txt）
   update 拉取最新代码，然后检查/安装依赖、重打补丁、补下缺失素材
   check  只检查不修改：解释器、依赖、ffmpeg、Playwright 浏览器、补丁、资产
@@ -615,22 +615,6 @@ def _fail() -> int:
 # --------------------------------------------------------------------------
 # run：启动主程序
 # --------------------------------------------------------------------------
-def _clean_upload_dir() -> None:
-    """与原 start.bat 行为一致：启动前清空 Upload/videos 里的历史视频。"""
-    target = ROOT / "Upload" / "videos"
-    if not target.is_dir():
-        return
-    videos = list(target.glob("*.mp4"))
-    if not videos:
-        return
-    say(f"清理待上传目录：删除 {len(videos)} 个历史 mp4（{target}）")
-    for video in videos:
-        try:
-            video.unlink()
-        except OSError as exc:
-            say(f"  [警告] 删除失败 {video.name}：{exc}")
-
-
 def env_with_scripts(interpreter: Path) -> dict[str, str]:
     """子进程环境：把解释器目录（以及 Windows 下 conda 的 Scripts）放到 PATH 最前面。
 
@@ -668,7 +652,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     say(f"使用解释器：{interpreter}")
     if args.dry_run:
-        say("（--dry-run：只检查环境，不清理目录、不启动 main.py）")
+        say("（--dry-run：只检查环境，不启动 main.py）")
         return 0
 
     if not ffmpeg_available():
@@ -676,7 +660,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         say("[依赖] 未找到 ffmpeg / ffprobe，视频处理需要它们；尝试自动安装 ...")
         ensure_ffmpeg()
 
-    _clean_upload_dir()
     say(f"启动 main.py（当前目录：{ROOT}）")
     say("-" * 62)
     try:
@@ -854,7 +837,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup.add_argument("--with-assets", action="store_true", help="同时下载大二进制资产")
     p_setup.set_defaults(func=cmd_setup)
 
-    p_run = sub.add_parser("run", help="清理待上传目录并启动 main.py")
+    p_run = sub.add_parser("run", help="启动 main.py（保留待上传成品）")
     p_run.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
     p_run.add_argument("--dry-run", action="store_true", help="只检查环境，不启动")
     p_run.set_defaults(func=cmd_run)

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import vm_gui.process as win_process
-from vm_gui.process import LogBuffer, ProcessManager, clean_upload_dir, tail_file
+from vm_gui.process import LogBuffer, ProcessManager, tail_file
 
 
 def test_log_buffer_is_incremental_and_bounded():
@@ -65,16 +65,6 @@ def test_tail_file_reads_last_lines(tmp_path: Path):
     path.write_text("a\nb\nc\n", encoding="utf-8")
     assert tail_file(path, max_lines=2) == ["b", "c"]
     assert tail_file(tmp_path / "missing.log") == []
-
-
-def test_clean_upload_dir_only_removes_mp4(tmp_path: Path):
-    videos = tmp_path / "Upload" / "videos"
-    videos.mkdir(parents=True)
-    (videos / "a.mp4").write_bytes(b"video")
-    (videos / "keep.txt").write_text("keep", encoding="utf-8")
-    assert clean_upload_dir(tmp_path) == 1
-    assert not (videos / "a.mp4").exists()
-    assert (videos / "keep.txt").is_file()
 
 
 def test_process_manager_initial_status(tmp_path: Path):
