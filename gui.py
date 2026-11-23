@@ -90,6 +90,16 @@ def index() -> None:
         "was_busy": MANAGER.busy(),
     }
     widgets: dict[str, Any] = {}
+    client = ui.context.client
+
+    def connected() -> bool:
+        """浏览器连接还在时才允许更新 UI。
+
+        NiceGUI 的定时器在标签页关闭后可能还会跑一拍；此时 push/set_text 会触发
+        “Client has been deleted but is still being used”（#3028）。所有异步回调
+        在更新界面前都先看这个。
+        """
+        return client.has_socket_connection
 
     # ------------------------------------------------------------------ 工具函数
     def as_int(value, empty=None):
@@ -130,6 +140,8 @@ def index() -> None:
             draft["f2"][key] = str(draft["f2"].get(key) or "").strip()
 
     def show_error(title: str, message: str) -> None:
+        if not connected():
+            return
         widgets["error_title"].set_text(title)  # type: ignore[union-attr]
         widgets["error_body"].set_text(message)  # type: ignore[union-attr]
         widgets["error_dialog"].open()  # type: ignore[union-attr]
@@ -167,6 +179,8 @@ def index() -> None:
                         )
 
     def refresh_status() -> None:
+        if not connected():
+            return
         status = MANAGER.status()
         if status["running"]:
             widgets["badge"].set_text(f"运行中 · {status['label']}")  # type: ignore[union-attr]
@@ -215,17 +229,23 @@ def index() -> None:
             badge.props("color=warning")
 
     async def refresh_external() -> None:
+        if not connected():
+            return
         try:
             page_state["external"] = await nicegui_run.io_bound(
                 MANAGER.find_external_main, 0
             )
         except Exception:  # noqa: BLE001 - 探测失败不应影响界面
             page_state["external"] = []
-        refresh_status()
+        if connected():
+            refresh_status()
 
     async def on_refresh() -> None:
+        if not connected():
+            return
         await refresh_external()
-        refresh_checks()
+        if connected():
+            refresh_checks()
 
     async def save_config(show_ok: bool = True) -> bool:
         sync_draft()
@@ -237,6 +257,8 @@ def index() -> None:
         except Exception as exc:  # noqa: BLE001
             show_error("配置保存失败", f"{type(exc).__name__}: {exc}")
             return False
+        if not connected():
+            return True
         if show_ok:
             ui.notify("配置已保存", type="positive")
         widgets["created_banner"].set_visibility(False)  # type: ignore[union-attr]
@@ -246,15 +268,21 @@ def index() -> None:
         return True
 
     async def on_save() -> None:
-        if await save_config(True) and MANAGER.busy():
+        if not await save_config(True) or not connected():
+            return
+        if MANAGER.busy():
             ui.notify("流水线正在使用旧配置，点“保存并重启”才会生效", type="info")
 
     async def on_save_restart() -> None:
-        if not await save_config(show_ok=False):
+        if not await save_config(show_ok=False) or not connected():
             return
         if MANAGER.busy():
             await nicegui_run.io_bound(MANAGER.stop, 12.0)
+            if not connected():
+                return
         ok, message = await nicegui_run.io_bound(MANAGER.start_main, True)
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "negative")
         refresh_status()
         if ok:
@@ -266,9 +294,11 @@ def index() -> None:
             ui.notify(f"已有任务在运行（{MANAGER.label}）", type="warning")
             return
         # 启动前把界面上的最新改动写盘，避免“改了没保存，启动的却是旧配置”。
-        if not await save_config(show_ok=False):
+        if not await save_config(show_ok=False) or not connected():
             return
         ok, message = await nicegui_run.io_bound(MANAGER.start_main, True)
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "negative")
         refresh_status()
         if ok:
@@ -277,11 +307,13 @@ def index() -> None:
 
     async def on_stop() -> None:
         ok, message = await nicegui_run.io_bound(MANAGER.stop, 12.0)
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "warning")
         await refresh_external()
 
     async def on_check_config() -> None:
-        if await save_config(show_ok=False):
+        if await save_config(show_ok=False) and connected():
             ui.notify("配置已保存，main.py 能正确解析这份配置", type="positive")
 
     async def on_export() -> None:
@@ -298,8 +330,12 @@ def index() -> None:
             return
         if not await save_config(show_ok=False):
             return
+        if not connected():
+            return
         account = str(draft["upload"].get("douyin_account") or "default")
         ok, message = MANAGER.export_cookie(account)
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "negative")
         if ok:
             widgets["tabs"].set_value("日志")  # type: ignore[union-attr]
@@ -310,18 +346,24 @@ def index() -> None:
             return
         account = str(draft["upload"].get("douyin_account") or "default").strip() or "default"
         ok, message = MANAGER.login_douyin(account)
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "negative")
         if ok:
             widgets["tabs"].set_value("日志")  # type: ignore[union-attr]
 
     async def on_assets() -> None:
         ok, message = MANAGER.download_assets()
+        if not connected():
+            return
         ui.notify(message, type="positive" if ok else "negative")
         if ok:
             widgets["tabs"].set_value("日志")  # type: ignore[union-attr]
 
     async def on_setup() -> None:
         ok, message = MANAGER.setup_environment()
+        if not connected():
+            return
         if ok:
             ui.notify(
                 "开始修复环境：会重装依赖，可能需要几分钟。完成后请关闭本窗口，重新双击 gui.bat。",
@@ -346,16 +388,22 @@ def index() -> None:
         except Exception as exc:  # noqa: BLE001
             show_error("API Key 保存失败", f"{type(exc).__name__}: {exc}")
             return
+        if not connected():
+            return
         ui.notify("已写入 .env（重启流水线后生效）", type="positive")
         refresh_checks()
 
     def add_source() -> None:
+        if not connected():
+            return
         draft["sources"].append(
             {"platform": "douyin", "account": "", "url": "", "download_dir": ""}
         )
         widgets["sources"].refresh()  # type: ignore[union-attr]
 
     def remove_source(index: int) -> None:
+        if not connected():
+            return
         if len(draft["sources"]) <= 1:
             ui.notify("至少保留一个视频源", type="warning")
             return
@@ -363,16 +411,24 @@ def index() -> None:
         widgets["sources"].refresh()  # type: ignore[union-attr]
 
     def pull_logs() -> None:
+        if not connected():
+            return
         new_lines = MANAGER.log.since(page_state["log_index"])
         if not new_lines:
             return
-        page_state["log_index"] = MANAGER.log.count
         live_log = widgets.get("live_log")
-        if live_log is not None:
-            for line in new_lines:
-                live_log.push(line)  # type: ignore[union-attr]
+        if live_log is None:
+            page_state["log_index"] = MANAGER.log.count
+            return
+        for line in new_lines:
+            if not connected():
+                return
+            live_log.push(line)  # type: ignore[union-attr]
+        page_state["log_index"] = MANAGER.log.count
 
     def refresh_applog() -> None:
+        if not connected():
+            return
         log_path = ROOT / "app.log"
         applog = widgets.get("applog")
         if applog is None:
@@ -380,17 +436,21 @@ def index() -> None:
         try:
             size = log_path.stat().st_size
         except OSError:
-            if not page_state.get("applog_missing"):
+            if not page_state.get("applog_missing") and connected():
                 applog.clear()  # type: ignore[union-attr]
                 applog.push("（还没有 app.log；启动流水线后会生成）")  # type: ignore[union-attr]
                 page_state["applog_missing"] = True
                 page_state["applog_size"] = None
             return
         page_state["applog_missing"] = False
+        if not connected():
+            return
         previous = page_state.get("applog_size")
         if previous is None or size < previous:
             applog.clear()  # type: ignore[union-attr]
             for line in tail_file(log_path, 400):
+                if not connected():
+                    return
                 applog.push(line)  # type: ignore[union-attr]
         elif size > previous:
             try:
@@ -400,8 +460,22 @@ def index() -> None:
             except OSError:
                 return
             for line in chunk.decode("utf-8", errors="replace").splitlines():
+                if not connected():
+                    return
                 applog.push(line)  # type: ignore[union-attr]
         page_state["applog_size"] = size
+
+    def timer_status() -> None:
+        if connected():
+            refresh_status()
+
+    def timer_logs() -> None:
+        if connected():
+            pull_logs()
+
+    def timer_applog() -> None:
+        if connected():
+            refresh_applog()
 
     # ------------------------------------------------------------------ 页头
     with ui.row().classes("w-full max-w-6xl mx-auto items-center justify-between pt-6 px-4"):
@@ -802,9 +876,9 @@ def index() -> None:
     refresh_summary()
     refresh_checks()
     refresh_applog()
-    ui.timer(1.0, refresh_status)
-    ui.timer(1.0, pull_logs)
-    ui.timer(2.0, refresh_applog)
+    ui.timer(1.0, timer_status)
+    ui.timer(1.0, timer_logs)
+    ui.timer(2.0, timer_applog)
     ui.timer(0.1, refresh_external, once=True)
 
 
