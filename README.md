@@ -193,7 +193,8 @@ Content input
   同名成品已存在时会跳过重复处理，不会因为停止而丢掉待上传内容。
 - 关掉启动 `gui.bat` 的控制台窗口会停止流水线；子进程绑定到 Windows
   Job Object，GUI 进程退出时会一起结束，避免残留 `main.py`。如果仍检测到外部
-  `main.py`，状态卡里可以点“强制结束外部 main.py”。
+  `main.py`，状态卡里可以点“强制结束外部 main.py”；该按钮不会结束当前 GUI
+  自己启动的进程。
 - 命令行方式 `start.bat` / `python main.py` 仍然可用，读的是同一份 `my_apps.yaml`。
 
 ### 配置

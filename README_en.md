@@ -163,7 +163,8 @@ Notes:
   uploads them directly and skips reprocessing when a matching output already exists.
 - Closing the launcher console stops the pipeline. Child processes are bound to a
   Windows Job Object, so the GUI process exit also terminates `main.py`; if an
-  external `main.py` is still detected, the status card offers a force-kill button.
+  external `main.py` is still detected, the status card offers a force-kill button
+  that never targets the GUI's own child process.
   `start.bat` and `python main.py` still work independently.
 
 ### Configuration

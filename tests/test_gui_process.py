@@ -107,3 +107,14 @@ def test_kill_external_main_terminates_process_tree(tmp_path: Path, monkeypatch)
     assert ok
     assert "4242" in message
     assert events == ["terminate 4242"]
+
+
+def test_kill_external_main_never_kills_its_own_process(tmp_path: Path, monkeypatch):
+    manager = ProcessManager(tmp_path)
+    monkeypatch.setattr(
+        manager, "find_external_main", lambda max_age=0: [{"pid": os.getpid()}]
+    )
+    ok, message = manager.kill_external_main()
+    assert ok is False
+    assert "自己启动" in message
+    assert "已忽略" in message

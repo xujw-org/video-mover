@@ -188,6 +188,7 @@ class ProcessManager:
         self._external_lock = threading.Lock()
         self._job_kernel32, self._job_handle = _create_job_object()
         self._job_warned = False
+        self._spawned_pids: set[int] = set()
 
     # ------------------------------------------------------------------ 状态
     @property
@@ -274,6 +275,7 @@ class ProcessManager:
                 return False
             self._assign_to_job(proc)
             self._proc = proc
+            self._spawned_pids.add(proc.pid)
             self._kind = kind
             self._label = label
             self._started_at = time.time()
@@ -294,6 +296,7 @@ class ProcessManager:
         end = time.time()
         duration = f"{int(end - (self._started_at or end))} 秒"
         with self._lock:
+            self._spawned_pids.discard(proc.pid)
             if self._proc is proc:
                 self._proc = None
                 self._kind = ""
@@ -472,15 +475,16 @@ class ProcessManager:
         own_children: set[int] = set()
         try:
             own_children = {
-                child.pid for child in psutil.Process(own_pid).children(recursive=False)
+                child.pid for child in psutil.Process(own_pid).children(recursive=True)
             }
         except PSUTIL_ERROR:
             pass
+        protected = own_children | set(self._spawned_pids)
         target = self.root / "main.py"
         for proc in psutil.process_iter(["pid", "name"]):
             try:
                 pid = int(proc.info.get("pid") or 0)
-                if pid in (own_pid, own_child) or pid in own_children:
+                if pid in (own_pid, own_child) or pid in protected:
                     continue
                 name = str(proc.info.get("name") or "").lower()
                 if "python" not in name:
@@ -506,13 +510,25 @@ class ProcessManager:
         return list(hits)
 
     def kill_external_main(self) -> tuple[bool, str]:
-        """强制结束检测到的外部 main.py 及其子进程（不留收尾机会）。"""
+        """强制结束检测到的外部 main.py 及其子进程（绝不碰当前 GUI 自己的进程树）。"""
         hits = self.find_external_main(max_age=0)
         if not hits:
             return False, "没有检测到外部的 main.py。"
+        protected = {os.getpid()} | set(self._spawned_pids)
+        try:
+            protected |= {
+                child.pid
+                for child in psutil.Process(os.getpid()).children(recursive=True)
+            }
+        except PSUTIL_ERROR:
+            pass
         stopped: list[str] = []
+        skipped: list[str] = []
         for item in hits:
             pid = int(item["pid"])
+            if pid in protected:
+                skipped.append(str(pid))
+                continue
             try:
                 parent = psutil.Process(pid)
                 children = parent.children(recursive=True)
@@ -538,8 +554,18 @@ class ProcessManager:
                 except PSUTIL_ERROR:
                     pass
             stopped.append(str(pid))
+        if not stopped:
+            self._external_cache = []
+            self._external_cache_at = 0.0
+            return (
+                False,
+                "检测到的 main.py 是当前 GUI 自己启动的进程（PID "
+                f"{'、'.join(skipped)}），已忽略，没有结束它。",
+            )
         self._external_cache = []
         self._external_cache_at = 0.0
         message = f"已强制结束外部 main.py（PID {'、'.join(stopped)}）。"
+        if skipped:
+            message += f" 跳过当前 GUI 子进程：{'、'.join(skipped)}。"
         self.log.add(f"[{_now_text()}] {message}")
         return True, message
