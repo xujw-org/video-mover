@@ -190,7 +190,9 @@ Content input
 - 界面只监听本机 `127.0.0.1`，默认端口 8765；重复双击 `gui.bat` 会直接打开已有页面。
 - 配置保存后，正在跑的流水线不会热加载；用界面里的“保存并重启”。
 - 启动前会清空 `Upload/videos` 里的历史 mp4（与 `start.bat` 一致，防止重复发布）。
-- 关掉启动 `gui.bat` 的控制台窗口会停止流水线；想脱离窗口运行仍可用 `start.bat`。
+- 关掉启动 `gui.bat` 的控制台窗口会停止流水线；子进程绑定到 Windows
+  Job Object，GUI 进程退出时会一起结束，避免残留 `main.py`。如果仍检测到外部
+  `main.py`，状态卡里可以点“强制结束外部 main.py”。
 - 命令行方式 `start.bat` / `python main.py` 仍然可用，读的是同一份 `my_apps.yaml`。
 
 ### 配置

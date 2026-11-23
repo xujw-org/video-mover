@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import signal
 import subprocess
@@ -27,6 +28,8 @@ from scripts.win_env import env_with_scripts
 
 IS_WINDOWS = os.name == "nt"
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+# 测试里的 psutil 替身没有 Error；真实 psutil 有。两者都能安全捕获。
+PSUTIL_ERROR = getattr(psutil, "Error", Exception)
 
 
 class LogBuffer:
@@ -105,6 +108,80 @@ def tail_file(path: Path, max_lines: int = 500, max_bytes: int = 512 * 1024) -> 
     return lines
 
 
+def _create_job_object():
+    """创建“GUI 退出就杀掉所有子进程”的 Windows Job Object。
+
+    直接关闭 gui.bat 的控制台窗口时，Python 不一定会走 on_shutdown；但进程退出时
+    Windows 会关闭 Job 句柄，带 KILL_ON_JOB_CLOSE 的 Job 会一起结束 main.py 和它的
+    子进程，避免残留。
+    """
+    if not IS_WINDOWS:
+        return None, None
+    try:
+        from ctypes import wintypes
+    except Exception:  # pragma: no cover - 只可能在非 Windows
+        return None, None
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class _BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BasicLimitInformation),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None, None
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    info = _ExtendedLimitInformation()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        job, 9, ctypes.byref(info), ctypes.sizeof(info)
+    ):
+        kernel32.CloseHandle(job)
+        return None, None
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    return kernel32, job
+
+
 class ProcessManager:
     """同一时间只允许一个业务进程（流水线或一次性任务）。"""
 
@@ -123,6 +200,8 @@ class ProcessManager:
         self._external_cache: list[dict[str, Any]] = []
         self._external_cache_at = 0.0
         self._external_lock = threading.Lock()
+        self._job_kernel32, self._job_handle = _create_job_object()
+        self._job_warned = False
 
     # ------------------------------------------------------------------ 状态
     @property
@@ -169,6 +248,21 @@ class ProcessManager:
         env.setdefault("PYTHONIOENCODING", "utf-8")
         return env
 
+    def _assign_to_job(self, proc: subprocess.Popen[str]) -> None:
+        if not self._job_handle:
+            return
+        try:
+            handle = int(proc._handle)  # type: ignore[attr-defined]
+            if not self._job_kernel32.AssignProcessToJobObject(self._job_handle, handle):
+                raise OSError(f"AssignProcessToJobObject 错误码 {ctypes.get_last_error()}")
+        except Exception as exc:  # noqa: BLE001 - Job 绑定失败不应阻止启动
+            if not self._job_warned:
+                self.log.add(
+                    f"[{_now_text()}] 警告：无法把子进程绑定到 Job Object，"
+                    f"关闭 GUI 时可能残留：{exc}"
+                )
+                self._job_warned = True
+
     def _spawn(self, kind: str, label: str, command: list[str], cwd: Path) -> bool:
         with self._lock:
             if self.proc_alive():
@@ -192,6 +286,7 @@ class ProcessManager:
             except OSError as exc:
                 self.log.add(f"[{_now_text()}] ✖ 启动失败：{exc}")
                 return False
+            self._assign_to_job(proc)
             self._proc = proc
             self._kind = kind
             self._label = label
@@ -358,17 +453,17 @@ class ProcessManager:
         for child in children:
             try:
                 child.terminate()
-            except psutil.Error:
+            except PSUTIL_ERROR:
                 pass
         try:
             parent.terminate()
-        except psutil.Error:
+        except PSUTIL_ERROR:
             pass
         gone, alive = psutil.wait_procs(children + [parent], timeout=3)
         for item in alive:
             try:
                 item.kill()
-            except psutil.Error:
+            except PSUTIL_ERROR:
                 pass
 
     # ------------------------------------------------------------------ 外部进程
@@ -402,7 +497,7 @@ class ProcessManager:
             own_children = {
                 child.pid for child in psutil.Process(own_pid).children(recursive=False)
             }
-        except psutil.Error:
+        except PSUTIL_ERROR:
             pass
         target = self.root / "main.py"
         for proc in psutil.process_iter(["pid", "name"]):
@@ -418,7 +513,7 @@ class ProcessManager:
                     continue
                 try:
                     cwd = proc.cwd()
-                except psutil.Error:
+                except PSUTIL_ERROR:
                     cwd = None
                 absolute = any(
                     Path(str(part)).resolve() == target
@@ -427,8 +522,47 @@ class ProcessManager:
                 )
                 if absolute or (cwd and Path(str(cwd)).resolve() == self.root):
                     hits.append({"pid": pid, "cwd": cwd})
-            except (psutil.Error, OSError, ValueError):
+            except (PSUTIL_ERROR, OSError, ValueError):
                 continue
         self._external_cache = hits
         self._external_cache_at = time.time()
         return list(hits)
+
+    def kill_external_main(self) -> tuple[bool, str]:
+        """强制结束检测到的外部 main.py 及其子进程（不留收尾机会）。"""
+        hits = self.find_external_main(max_age=0)
+        if not hits:
+            return False, "没有检测到外部的 main.py。"
+        stopped: list[str] = []
+        for item in hits:
+            pid = int(item["pid"])
+            try:
+                parent = psutil.Process(pid)
+                children = parent.children(recursive=True)
+            except psutil.NoSuchProcess:
+                stopped.append(f"{pid}（已退出）")
+                continue
+            except PSUTIL_ERROR as exc:
+                stopped.append(f"{pid}（失败：{exc}）")
+                continue
+            for child in children:
+                try:
+                    child.terminate()
+                except PSUTIL_ERROR:
+                    pass
+            try:
+                parent.terminate()
+            except PSUTIL_ERROR:
+                pass
+            _gone, alive = psutil.wait_procs(children + [parent], timeout=5)
+            for proc in alive:
+                try:
+                    proc.kill()
+                except PSUTIL_ERROR:
+                    pass
+            stopped.append(str(pid))
+        self._external_cache = []
+        self._external_cache_at = 0.0
+        message = f"已强制结束外部 main.py（PID {'、'.join(stopped)}）。"
+        self.log.add(f"[{_now_text()}] {message}")
+        return True, message

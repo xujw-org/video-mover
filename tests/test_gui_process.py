@@ -2,8 +2,12 @@
 """GUI 后端的小工具：日志缓冲、日志尾读、上传目录清理、进程状态。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+
+import vm_gui.process as win_process
 from vm_gui.process import LogBuffer, ProcessManager, clean_upload_dir, tail_file
 
 
@@ -80,3 +84,36 @@ def test_process_manager_initial_status(tmp_path: Path):
     assert status["exit_code"] is None
     assert status["pid"] is None
     assert manager.busy() is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object only")
+def test_process_manager_creates_kill_on_close_job(tmp_path: Path):
+    manager = ProcessManager(tmp_path)
+    assert manager._job_handle
+
+
+def test_kill_external_main_terminates_process_tree(tmp_path: Path, monkeypatch):
+    events = []
+
+    class FakeProc:
+        def __init__(self, pid: int):
+            self.pid = pid
+
+        def children(self, recursive: bool = True):
+            return []
+
+        def terminate(self):
+            events.append(f"terminate {self.pid}")
+
+    manager = ProcessManager(tmp_path)
+    monkeypatch.setattr(
+        manager, "find_external_main", lambda max_age=0: [{"pid": 4242}]
+    )
+    monkeypatch.setattr(win_process.psutil, "Process", lambda pid: FakeProc(pid))
+    monkeypatch.setattr(
+        win_process.psutil, "wait_procs", lambda procs, timeout: (procs, []), raising=False
+    )
+    ok, message = manager.kill_external_main()
+    assert ok
+    assert "4242" in message
+    assert events == ["terminate 4242"]

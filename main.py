@@ -1002,8 +1002,8 @@ class SchedulerManager:
         self.shutdown(signum)
 
     def _windows_signal_handler(self, dwCtrlType: int) -> bool:
-        if dwCtrlType in (0, 1):  # CTRL_C_EVENT 或 CTRL_BREAK_EVENT
-            logging.info("接收到 Windows 控制信号，正在关闭调度器...")
+        if dwCtrlType in (0, 1, 2):  # CTRL_C / CTRL_BREAK / CTRL_CLOSE
+            logging.info(f"接收到 Windows 控制信号 {dwCtrlType}，正在关闭调度器...")
             self.shutdown()
             return True
         return False

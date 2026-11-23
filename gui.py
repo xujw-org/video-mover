@@ -248,12 +248,16 @@ def index() -> None:
             if external:
                 pids = "、".join(str(item["pid"]) for item in external)
                 external_label.set_text(
-                    f"检测到外部也在运行 main.py（PID {pids}）。请先到那个命令行窗口按 Ctrl+C，"
+                    f"检测到外部也在运行 main.py（PID {pids}）。"
+                    "可以点下面“强制结束外部 main.py”，或到那个命令行窗口按 Ctrl+C；"
                     "否则两边会同时抓取/上传。"
                 )
                 external_label.set_visibility(True)
             else:
                 external_label.set_visibility(False)
+        external_kill = widgets.get("external_kill")
+        if external_kill is not None:
+            external_kill.set_visibility(bool(external))
 
         if page_state["was_busy"] and not status["running"]:
             refresh_checks()
@@ -289,6 +293,16 @@ def index() -> None:
         await refresh_external()
         if connected():
             refresh_checks()
+
+    async def on_kill_external() -> None:
+        if not connected():
+            return
+        ok, message = await nicegui_run.io_bound(MANAGER.kill_external_main)
+        if not connected():
+            return
+        ui.notify(message, type="positive" if ok else "warning")
+        await refresh_external()
+        refresh_checks()
 
     async def save_config(show_ok: bool = True) -> bool:
         sync_draft()
@@ -585,6 +599,17 @@ def index() -> None:
                     "text-sm text-orange-600 whitespace-pre-wrap"
                 )
                 widgets["external"].set_visibility(False)
+                widgets["external_kill"] = ui.button(
+                    "强制结束外部 main.py",
+                    icon="dangerous",
+                    color="negative",
+                    on_click=on_kill_external,
+                ).props("outline dense")
+                widgets["external_kill"].set_visibility(False)
+                widgets["external_kill"].tooltip(
+                    "直接结束外部 main.py 及其浏览器/ffmpeg 子进程；"
+                    "正在上传或去重的任务会被中断。"
+                )
                 ui.separator()
                 ui.label(
                     "启动前会清空 Upload/videos 里的历史 mp4（与 start.bat 一致，防止重复发布）。"
@@ -924,6 +949,8 @@ def index() -> None:
 - 启动前会删除 `Upload/videos` 里的历史 mp4（与 `start.bat` 一致），防止重复发布。
 - 日志按“最新在上”显示；每次启动流水线会清空本次输出，旧 `app.log` 备份为
   `app.log.prev`，不会和上一轮业务混在一起。
+- 关掉启动 `gui.bat` 的控制台窗口时，子进程会随 Windows Job Object 一起结束；
+  如果仍检测到外部 `main.py`，点状态卡里的“强制结束外部 main.py”。
 - 配置保存后，正在跑的流水线不会热加载；用“保存并重启”。
 - 界面只监听 `127.0.0.1`，默认端口 `8765`；重复双击 `gui.bat` 会直接打开已有页面。
 - 如果又双击了 `start.bat`，界面会检测到外部 `main.py` 并阻止重复启动。
