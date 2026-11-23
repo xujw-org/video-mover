@@ -2,6 +2,7 @@
 """GUI 配置层回归测试：模板复制、round-trip、校验、.env 写入。"""
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -153,6 +154,26 @@ def test_dotenv_roundtrip_preserves_other_lines(tmp_path):
     assert path.read_text(encoding="utf-8").count("DASHSCOPE_API_KEY") == 1
 
 
+def _write_upload_state(
+    root: Path, account: str = "default", names=("sessionid", "sid_guard", "ttwid")
+) -> Path:
+    path = root / "Upload" / "cookies" / f"douyin_{account}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": name, "value": "v", "domain": ".douyin.com", "path": "/"}
+                    for name in names
+                ],
+                "origins": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_config_checks_flags_placeholder_cookie(tmp_path):
     store = _store(tmp_path)
     store.ensure_config()
@@ -164,3 +185,52 @@ def test_config_checks_flags_placeholder_cookie(tmp_path):
     assert cookie["ok"] is False
     login = next(item for item in items if item["title"] == "上传登录态")
     assert login["ok"] is False
+
+
+def test_config_checks_accepts_scanned_login_state(tmp_path):
+    """扫码登录只写 Upload/cookies，my_apps.yaml 里仍是占位符，也应算可用。"""
+    store = _store(tmp_path)
+    store.ensure_config()
+    draft = store.load()
+    draft["f2"]["douyin_cookie"] = "YOUR_DOYIN_COOKIE_HERE"
+    draft["upload"]["douyin_account"] = "default"
+    _write_upload_state(tmp_path)
+
+    items = config_checks(store, draft)
+    cookie = next(item for item in items if item["title"] == "抖音 Cookie")
+    assert cookie["ok"] is True
+    assert "扫码登录" in cookie["detail"]
+    login = next(item for item in items if item["title"] == "上传登录态")
+    assert login["ok"] is True
+    assert "sessionid" not in login["detail"]
+
+
+def test_config_checks_rejects_state_without_full_login(tmp_path):
+    store = _store(tmp_path)
+    store.ensure_config()
+    draft = store.load()
+    draft["f2"]["douyin_cookie"] = ""
+    draft["upload"]["douyin_account"] = "default"
+    _write_upload_state(tmp_path, names=("sessionid", "ttwid"))
+
+    items = config_checks(store, draft)
+    cookie = next(item for item in items if item["title"] == "抖音 Cookie")
+    assert cookie["ok"] is False
+    login = next(item for item in items if item["title"] == "上传登录态")
+    assert login["ok"] is False
+    assert "sessionid/sid_guard" in login["detail"]
+
+
+def test_config_checks_reads_cookie_from_saved_yaml_when_draft_is_stale(tmp_path):
+    store = _store(tmp_path)
+    store.ensure_config()
+    valid = store.load()
+    valid["f2"]["douyin_cookie"] = "sessionid=abc; ttwid=1"
+    store.save(valid, validate=False)
+
+    stale = store.load()
+    stale["f2"]["douyin_cookie"] = "YOUR_DOYIN_COOKIE_HERE"
+    items = config_checks(store, stale)
+    cookie = next(item for item in items if item["title"] == "抖音 Cookie")
+    assert cookie["ok"] is True
+    assert "已填写" in cookie["detail"]

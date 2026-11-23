@@ -290,7 +290,8 @@ def index() -> None:
             return
         if cookie_missing(str(draft.get("f2", {}).get("douyin_cookie", ""))):
             ui.notify(
-                "请先在“配置 → 高级：f2 Cookie 与代理”里粘贴抖音 Cookie，再导出。",
+                "请先在“配置 → 高级：f2 Cookie 与代理”里粘贴抖音 Cookie 再导出；"
+                "如果已经扫码登录成功，则不需要再导出。",
                 type="warning",
             )
             widgets["tabs"].set_value("配置")  # type: ignore[union-attr]

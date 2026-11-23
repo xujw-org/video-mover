@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 from pathlib import Path
@@ -59,6 +60,33 @@ def _format_mtime(path: Path) -> str:
         return "未知时间"
 
 
+def _upload_cookie_state(path: Path) -> dict[str, Any] | None:
+    """读 Playwright storage_state；返回 None 表示文件缺失或无法解析。
+
+    抖音的登录态是 ``cookies`` 数组里的 ``sessionid``。只判断文件存在是不够的：
+    空文件、只有 ttwid 的旧文件都不能拿去抓取/上传。
+    """
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    cookies = data.get("cookies") if isinstance(data, dict) else None
+    if not isinstance(cookies, list) or not cookies:
+        return None
+    names = {
+        str(cookie.get("name"))
+        for cookie in cookies
+        if isinstance(cookie, dict) and cookie.get("name")
+    }
+    return {
+        "count": len(cookies),
+        "has_login": "sessionid" in names and "sid_guard" in names,
+        "mtime": _format_mtime(path),
+    }
+
+
 def config_checks(store: ConfigStore, draft: dict[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
@@ -74,12 +102,13 @@ def config_checks(store: ConfigStore, draft: dict[str, Any]) -> list[dict[str, A
             )
         )
 
+    loaded_draft: dict[str, Any] = {}
     try:
-        loaded = store.load()
+        loaded_draft = store.load()
     except Exception as exc:  # noqa: BLE001
         items.append(_item(False, "YAML 可读", str(exc), "config"))
     else:
-        loaded_sources = loaded.get("sources") or []
+        loaded_sources = loaded_draft.get("sources") or []
         if loaded_sources:
             names = "、".join(
                 f"{s.get('platform')} {s.get('account')}" for s in loaded_sources
@@ -88,30 +117,57 @@ def config_checks(store: ConfigStore, draft: dict[str, Any]) -> list[dict[str, A
         else:
             items.append(_item(False, "视频源", "还没有视频源，请在“配置”里添加博主。", "config"))
 
-    douyin_cookie = draft.get("f2", {}).get("douyin_cookie", "")
+    account = str(draft.get("upload", {}).get("douyin_account") or "default")
+    cookie_path = _upload_cookie_path(store.root, account)
+    upload_state = _upload_cookie_state(cookie_path)
+
+    douyin_cookie = str(draft.get("f2", {}).get("douyin_cookie", ""))
+    saved_cookie = str(loaded_draft.get("f2", {}).get("douyin_cookie", ""))
+    if cookie_missing(douyin_cookie) and not cookie_missing(saved_cookie):
+        douyin_cookie = saved_cookie
     if needs_douyin_cookie(draft):
-        if cookie_missing(douyin_cookie):
+        if not cookie_missing(douyin_cookie):
+            items.append(_item(True, "抖音 Cookie", "已填写（my_apps.yaml → douyin.cookie）"))
+        elif upload_state and upload_state["has_login"]:
+            items.append(
+                _item(
+                    True,
+                    "抖音 Cookie",
+                    "my_apps.yaml 里是占位符，但检测到扫码登录生成的 "
+                    f"{cookie_path.relative_to(store.root)}；"
+                    "抓取和上传会使用这份登录态，不用再手抄 Cookie。",
+                )
+            )
+        else:
             items.append(
                 _item(
                     False,
                     "抖音 Cookie",
-                    "my_apps.yaml 的 douyin.cookie 还是空的/模板占位符；抖音抓取和上传都需要它。",
+                    "my_apps.yaml 的 douyin.cookie 是空的/模板占位符，"
+                    "也没有可用的扫码登录态；请粘贴网页 Cookie 或点“扫码登录抖音”。",
                     "config",
                 )
             )
-        else:
-            items.append(_item(True, "抖音 Cookie", "已填写（my_apps.yaml → douyin.cookie）"))
     else:
         items.append(_item(True, "抖音 Cookie", "当前配置没用到抖音，可留空"))
 
-    account = str(draft.get("upload", {}).get("douyin_account") or "default")
-    cookie_path = _upload_cookie_path(store.root, account)
-    if cookie_path.is_file():
+    if upload_state and upload_state["has_login"]:
         items.append(
             _item(
                 True,
                 "上传登录态",
-                f"{cookie_path.relative_to(store.root)}（更新于 {_format_mtime(cookie_path)}）",
+                f"{cookie_path.relative_to(store.root)}"
+                f"（{upload_state['count']} 条 cookie，更新于 {upload_state['mtime']}）",
+            )
+        )
+    elif cookie_path.is_file():
+        items.append(
+            _item(
+                False,
+                "上传登录态",
+                f"{cookie_path.relative_to(store.root)} 存在，但里面没有 sessionid/sid_guard；"
+                "可能过期或文件损坏，请重新扫码登录或导出 Cookie。",
+                "login",
             )
         )
     else:
@@ -120,7 +176,7 @@ def config_checks(store: ConfigStore, draft: dict[str, Any]) -> list[dict[str, A
                 False,
                 "上传登录态",
                 f"缺少 {cookie_path.relative_to(store.root)}；"
-                "填好抖音 Cookie 后点“导出 Cookie”，或“扫码登录”。",
+                "点“导出 Cookie”或“扫码登录抖音”。",
                 "login",
             )
         )
