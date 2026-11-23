@@ -99,25 +99,75 @@ def test_update_flags():
     assert args.func is win_env.cmd_update
 
 
-def test_update_pulls_then_runs_setup_and_assets(monkeypatch):
-    calls = []
-    monkeypatch.setattr(win_env, "ensure_interpreter", lambda env: Path("python"))
-    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 0)
+def _mock_update_git(
+    monkeypatch,
+    *,
+    branch="main",
+    origin=win_env.CANONICAL_REMOTE,
+    remote_set_ok=True,
+):
+    def fake_captured(cmd):
+        if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+            return 0, f"{branch}\n"
+        if cmd[:3] == ["git", "remote", "get-url"]:
+            return 0, f"{origin}\n"
+        return 0, ""
 
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        if cmd[:4] == ["git", "remote", "set-url", "origin"]:
+            return 0 if remote_set_ok else 1
+        return 0
+
+    calls = []
+    monkeypatch.setattr(win_env, "run_captured", fake_captured)
+    monkeypatch.setattr(win_env, "run", fake_run)
+    monkeypatch.setattr(win_env, "ensure_interpreter", lambda env: Path("python"))
+    return calls
+
+
+def test_update_pulls_then_runs_setup_and_assets(monkeypatch):
+    calls = _mock_update_git(monkeypatch)
     assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
-    assert calls[0] == ["git", "pull", "--ff-only"]
+    assert calls[0] == ["git", "pull", "--ff-only", "origin", "main"]
     setup = [cmd for cmd in calls if any(str(part).endswith("win_env.py") for part in cmd)]
     assert setup and "setup" in setup[0] and "--env" in setup[0] and "dy" in setup[0]
     assert any("download_assets.py" in str(cmd) for cmd in calls)
 
 
 def test_update_stops_when_git_pull_fails(monkeypatch):
-    calls = []
-    monkeypatch.setattr(win_env, "ensure_interpreter", lambda env: Path("python"))
-    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 1)
+    calls = _mock_update_git(monkeypatch)
 
+    def fail_pull(cmd):
+        calls.append(list(cmd))
+        return 1
+
+    monkeypatch.setattr(win_env, "run", fail_pull)
     assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
-    assert calls == [["git", "pull", "--ff-only"]]
+    assert calls == [["git", "pull", "--ff-only", "origin", "main"]]
+
+
+def test_update_fixes_old_origin(monkeypatch):
+    calls = _mock_update_git(
+        monkeypatch, origin="http://10.1.1.5:3000/xujinwen/video-mover.git"
+    )
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
+    assert ["git", "remote", "set-url", "origin", win_env.CANONICAL_REMOTE] in calls
+    assert ["git", "pull", "--ff-only", "origin", "main"] in calls
+
+
+def test_update_falls_back_to_explicit_url(monkeypatch):
+    calls = _mock_update_git(
+        monkeypatch, origin="http://old.example/repo.git", remote_set_ok=False
+    )
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
+    assert ["git", "pull", "--ff-only", win_env.CANONICAL_REMOTE, "main"] in calls
+
+
+def test_update_requires_main_branch(monkeypatch):
+    calls = _mock_update_git(monkeypatch, branch="dev")
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
+    assert calls == []
 
 
 # --------------------------------------------------------------------------

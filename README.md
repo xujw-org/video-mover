@@ -286,6 +286,10 @@ Content input
 base；三者都没有时会用 `scripts/bootstrap_python.ps1` 自动安装 Python 3.12+，
 再创建 `.venv`。所以换一台没装 Python 的电脑也能直接双击这个脚本。
 
+更新脚本只同步 `main`：当前分支不是 `main` 会停下并提示 `git switch main`。
+如果旧克隆的 `origin` 不是 `https://git.xujw.top/xujinwen/video-mover.git`，
+脚本会先改正 `origin` 再拉取，避免“update.bat 跑完还是旧代码”。
+
 如果 pull 因为本机有未提交修改、分支分叉或网络问题失败，脚本会立即停下并提示，
 不会继续改依赖。更新完成后用 `gui.bat` 或 `start.bat` 启动。
 

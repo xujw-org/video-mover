@@ -183,6 +183,11 @@ Environment discovery matches `setup.bat`: a conda env first, then the project
 Python 3.12+ and a `.venv` is created, so a PC without Python can run this script
 directly.
 
+The updater only follows `main`; it stops with a `git switch main` hint on other
+branches. If an old clone's `origin` points elsewhere, it is rewritten to
+`https://git.xujw.top/xujinwen/video-mover.git` before pulling, so a stale remote
+cannot make `update.bat` silently keep old code.
+
 If the pull fails because of local modifications, divergent branches or network
 problems, the script stops immediately and does not touch dependencies.
 Start with `gui.bat` or `start.bat` afterwards.

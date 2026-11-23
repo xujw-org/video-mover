@@ -45,6 +45,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = "dy"
+CANONICAL_REMOTE = os.environ.get(
+    "VIDEO_MOVER_REPO_URL", "https://git.xujw.top/xujinwen/video-mover.git"
+)
 
 
 # --------------------------------------------------------------------------
@@ -741,7 +744,32 @@ def cmd_update(args: argparse.Namespace) -> int:
     say("=" * 62)
     say(f"更新代码：{ROOT}")
     say("=" * 62)
-    if run(["git", "pull", "--ff-only"]) != 0:
+
+    code, branch_out = run_captured(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    branch = branch_out.strip() if code == 0 else ""
+    if branch != "main":
+        say(f"[错误] 当前分支是 {branch or '未知'}，更新脚本只同步 main。")
+        say("       请先执行：git switch main")
+        return 1
+
+    code, origin_out = run_captured(["git", "remote", "get-url", "origin"])
+    origin = origin_out.strip() if code == 0 else ""
+    remote_ok = True
+    if origin != CANONICAL_REMOTE:
+        if origin:
+            say(f"origin 当前为 {origin}")
+            say(f"改为 {CANONICAL_REMOTE}")
+            remote_ok = run(["git", "remote", "set-url", "origin", CANONICAL_REMOTE]) == 0
+        else:
+            say(f"没有 origin，添加 {CANONICAL_REMOTE}")
+            remote_ok = run(["git", "remote", "add", "origin", CANONICAL_REMOTE]) == 0
+        if not remote_ok:
+            say("[警告] origin 修改失败，将直接按完整地址拉取。")
+
+    pull_cmd = ["git", "pull", "--ff-only"]
+    pull_cmd += ["origin", "main"] if remote_ok else [CANONICAL_REMOTE, "main"]
+    say(f"拉取：{' '.join(pull_cmd)}")
+    if run(pull_cmd) != 0:
         say()
         say("[错误] git pull 失败，未继续更新依赖。常见原因：")
         say("  - 本机还有未提交的修改：先 git status 查看并处理；")
@@ -769,6 +797,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     say()
     say("=" * 62)
     say(f"更新完成。启动图形界面：gui.bat {args.env}")
+    say("如果 GUI 已经开着，请先关闭旧窗口，再重新双击 gui.bat。")
     say("=" * 62)
     return 0
 
