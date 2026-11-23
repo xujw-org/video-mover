@@ -272,6 +272,21 @@ Content input
 2. 如启用 AI 文案功能，通过安全的本地配置方式提供 API Key，切勿提交到仓库。
 3. 首次运行平台适配器时，根据提示完成账号登录与 Cookie 初始化。
 
+### 更新
+
+旧电脑已经 `git clone` 过时，双击 `update.bat`（环境名不是 `dy` 时用
+`update.bat 环境名`）。它会依次：
+
+1. `git pull --ff-only` 拉取最新代码；
+2. 重跑 setup：检查/安装依赖、Playwright、上游补丁、ffmpeg；
+3. 补下缺失的大二进制素材（已有的会跳过）。
+
+如果 pull 因为本机有未提交修改、分支分叉或网络问题失败，脚本会立即停下并提示，
+不会继续改依赖。更新完成后用 `gui.bat` 或 `start.bat` 启动。
+
+注意：`my_apps.yaml`、`.env`、`Upload/cookies/` 都是本机文件，不会被 `git pull`
+更新；不要把它们提交到仓库。
+
 ### 运行
 
 双击 `gui.bat`（图形界面，推荐；见上文“图形界面”），或双击 `start.bat`

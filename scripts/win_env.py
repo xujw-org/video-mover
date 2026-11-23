@@ -19,12 +19,14 @@
     python scripts/win_env.py setup  [--env NAME] [--with-assets]
     python scripts/win_env.py run    [--env NAME] [--dry-run]
     python scripts/win_env.py gui    [--env NAME]
+    python scripts/win_env.py update [--env NAME]
     python scripts/win_env.py check  [--env NAME]
 
   setup  确认环境（缺失时自动创建 conda 环境或 .venv）→ 安装依赖、装 Playwright
          浏览器、打上游补丁；Python 解释器本身由 setup.bat 负责装
   run    清理待上传目录并启动 main.py
   gui    启动 NiceGUI 图形控制台（缺依赖时自动安装 requirements-gui.txt）
+  update 拉取最新代码，然后检查/安装依赖、重打补丁、补下缺失素材
   check  只检查不修改：解释器、依赖、ffmpeg、Playwright 浏览器、补丁、资产
 """
 
@@ -729,6 +731,38 @@ def cmd_gui(args: argparse.Namespace) -> int:
         return 130
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """拉取最新代码，再走一遍 setup（依赖/补丁/ffmpeg），最后补素材。"""
+    interpreter = require_interpreter(args.env)
+    say("=" * 62)
+    say(f"更新代码：{ROOT}")
+    say("=" * 62)
+    if run(["git", "pull", "--ff-only"]) != 0:
+        say()
+        say("[错误] git pull 失败，未继续更新依赖。常见原因：")
+        say("  - 本机还有未提交的修改：先 git status 查看并处理；")
+        say("  - 本地分支和远端分叉：需要先合并或变基；")
+        say("  - 网络或账号凭据问题。")
+        return 1
+
+    say()
+    say("代码已更新，开始检查依赖、Playwright、上游补丁和 ffmpeg ...")
+    setup_args = argparse.Namespace(env=args.env, torch="auto", with_assets=False)
+    if cmd_setup(setup_args) != 0:
+        return 1
+
+    say()
+    say("补下缺失的大二进制资产（已有的会跳过）...")
+    if run([str(interpreter), str(ROOT / "scripts" / "download_assets.py")]) != 0:
+        say("[警告] 资产下载失败；可以稍后在图形界面点“下载素材”重试。")
+
+    say()
+    say("=" * 62)
+    say(f"更新完成。启动图形界面：gui.bat {args.env}")
+    say("=" * 62)
+    return 0
+
+
 # --------------------------------------------------------------------------
 # 入口
 # --------------------------------------------------------------------------
@@ -761,6 +795,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_gui = sub.add_parser("gui", help="启动图形操作界面（NiceGUI，浏览器打开）")
     p_gui.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
     p_gui.set_defaults(func=cmd_gui)
+
+    p_update = sub.add_parser("update", help="拉取最新代码并更新依赖、补丁和素材")
+    p_update.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
+    p_update.set_defaults(func=cmd_update)
     return parser
 
 

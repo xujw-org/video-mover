@@ -18,6 +18,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,7 +31,7 @@ win_env = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(win_env)
 
 EXE_NAME = "python.exe" if os.name == "nt" else "python"
-BAT_FILES = ["setup.bat", "start.bat", "gui.bat"]
+BAT_FILES = ["setup.bat", "start.bat", "gui.bat", "update.bat"]
 
 
 # --------------------------------------------------------------------------
@@ -89,6 +90,43 @@ def test_gui_flags():
     assert args.env == "py312"
     assert args.command == "gui"
     assert args.func is win_env.cmd_gui
+
+
+def test_update_flags():
+    args = win_env.build_parser().parse_args(["update", "--env", "py312"])
+    assert args.env == "py312"
+    assert args.command == "update"
+    assert args.func is win_env.cmd_update
+
+
+def test_update_pulls_then_runs_setup_and_assets(monkeypatch):
+    calls = []
+    monkeypatch.setattr(win_env, "require_interpreter", lambda env: Path("python"))
+    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 0)
+
+    def fake_setup(args):
+        calls.append(["setup", args.env])
+        return 0
+
+    monkeypatch.setattr(win_env, "cmd_setup", fake_setup)
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
+    assert calls[0] == ["git", "pull", "--ff-only"]
+    assert ["setup", "dy"] in calls
+    assert any("download_assets.py" in str(cmd) for cmd in calls)
+
+
+def test_update_stops_when_git_pull_fails(monkeypatch):
+    calls = []
+    monkeypatch.setattr(win_env, "require_interpreter", lambda env: Path("python"))
+    monkeypatch.setattr(win_env, "run", lambda cmd: calls.append(list(cmd)) or 1)
+
+    def fake_setup(args):
+        calls.append(["setup", args.env])
+        return 0
+
+    monkeypatch.setattr(win_env, "cmd_setup", fake_setup)
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
+    assert calls == [["git", "pull", "--ff-only"]]
 
 
 # --------------------------------------------------------------------------
@@ -436,4 +474,4 @@ def test_help_runs():
     )
     assert proc.returncode == 0
     out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
-    assert "setup" in out and "run" in out and "check" in out and "gui" in out
+    assert "setup" in out and "run" in out and "check" in out and "gui" in out and "update" in out

@@ -167,6 +167,22 @@ Notes:
 2. If AI-assisted copy is enabled, provide API credentials through secure local configuration — never commit them.
 3. Initialize account sessions and cookies when running a platform adapter for the first time.
 
+### Update
+
+On a machine that has already been cloned, double-click `update.bat` (or
+`update.bat ENV_NAME`). It runs:
+
+1. `git pull --ff-only`;
+2. setup again: dependencies, Playwright, upstream patches, ffmpeg;
+3. download missing binary assets (existing files are skipped).
+
+If the pull fails because of local modifications, divergent branches or network
+problems, the script stops immediately and does not touch dependencies.
+Start with `gui.bat` or `start.bat` afterwards.
+
+`my_apps.yaml`, `.env` and `Upload/cookies/` are local files and are not updated
+by `git pull`.
+
 ### Run
 
 Double-click `gui.bat` (GUI, recommended; see “GUI” above), or `start.bat`
