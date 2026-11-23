@@ -25,6 +25,37 @@ def test_log_buffer_ignores_blank_lines():
     assert buffer.snapshot() == ["x"]
 
 
+def test_log_buffer_clear_resets_index():
+    buffer = LogBuffer()
+    buffer.add("old")
+    buffer.clear()
+    assert buffer.count == 0
+    assert buffer.snapshot() == []
+    assert buffer.since(0) == []
+
+
+def test_reset_logs_rotates_app_log(tmp_path: Path):
+    log_path = tmp_path / "app.log"
+    log_path.write_text("old run\n", encoding="utf-8")
+    manager = ProcessManager(tmp_path)
+    manager.log.add("old line")
+    manager.reset_logs()
+    assert not log_path.exists()
+    assert (tmp_path / "app.log.prev").read_text(encoding="utf-8") == "old run\n"
+    lines = manager.log.snapshot()
+    assert any("已清空上一轮日志" in line for line in lines)
+    assert all("old line" not in line for line in lines)
+
+
+def test_reset_logs_without_old_file(tmp_path: Path):
+    manager = ProcessManager(tmp_path)
+    manager.log.add("old line")
+    manager.reset_logs()
+    assert not (tmp_path / "app.log.prev").exists()
+    assert manager.log.count == 1
+    assert "已清空上一轮日志" in manager.log.snapshot()[0]
+
+
 def test_tail_file_reads_last_lines(tmp_path: Path):
     path = tmp_path / "app.log"
     path.write_text("a\nb\nc\n", encoding="utf-8")

@@ -69,6 +69,49 @@ def _open_path(path: Path) -> None:
         ui.notify(f"打不开 {path}：{exc}", type="negative")
 
 
+class ReversedLog:
+    """最新一行在最上面的日志视图（用 scroll_area + 插入到顶部实现）。"""
+
+    def __init__(self, max_lines: int = 2000, height: str = "h-72"):
+        self.max_lines = max_lines
+        self.scroll = ui.scroll_area().classes(
+            f"w-full {height} bg-slate-950 text-slate-100 rounded p-3"
+        )
+        with self.scroll:
+            self.column = ui.column().classes("w-full gap-0 font-mono text-xs")
+
+    def _label(self, line: str):
+        with self.column:
+            return ui.label(str(line)).classes(
+                "w-full whitespace-pre-wrap break-all leading-5"
+            )
+
+    def clear(self) -> None:
+        self.column.clear()
+        self.scroll_to_top()
+
+    def push(self, line: str) -> None:
+        self._label(line).move(self.column, 0)
+        while len(self.column.default_slot.children) > self.max_lines:
+            self.column.remove(-1)
+
+    def set_lines(self, lines: list[str]) -> None:
+        """整块替换，按“新 → 旧”渲染（初始化/日志轮转时用，别逐行插入）。"""
+        self.column.clear()
+        with self.column:
+            for line in reversed(lines[-self.max_lines :]):
+                ui.label(str(line)).classes("w-full whitespace-pre-wrap break-all leading-5")
+        self.scroll_to_top()
+
+    def push_many(self, lines: list[str]) -> None:
+        for line in lines:
+            self.push(line)
+        self.scroll_to_top()
+
+    def scroll_to_top(self) -> None:
+        self.scroll.scroll_to(percent=0.0, duration=0.0)
+
+
 @ui.page("/")
 def index() -> None:
     ui.page_title("Video Mover 控制台")
@@ -286,6 +329,7 @@ def index() -> None:
         ui.notify(message, type="positive" if ok else "negative")
         refresh_status()
         if ok:
+            reset_log_views()
             await refresh_external()
             widgets["tabs"].set_value("日志")  # type: ignore[union-attr]
 
@@ -302,6 +346,7 @@ def index() -> None:
         ui.notify(message, type="positive" if ok else "negative")
         refresh_status()
         if ok:
+            reset_log_views()
             await refresh_external()
             widgets["tabs"].set_value("日志")  # type: ignore[union-attr]
 
@@ -413,17 +458,21 @@ def index() -> None:
     def pull_logs() -> None:
         if not connected():
             return
-        new_lines = MANAGER.log.since(page_state["log_index"])
-        if not new_lines:
-            return
         live_log = widgets.get("live_log")
         if live_log is None:
-            page_state["log_index"] = MANAGER.log.count
+            return
+        if page_state["log_index"] > MANAGER.log.count:
+            # 新一轮启动时 LogBuffer.clear() 会把序号归零。
+            live_log.clear()  # type: ignore[union-attr]
+            page_state["log_index"] = 0
+        new_lines = MANAGER.log.since(page_state["log_index"])
+        if not new_lines:
             return
         for line in new_lines:
             if not connected():
                 return
             live_log.push(line)  # type: ignore[union-attr]
+        live_log.scroll_to_top()  # type: ignore[union-attr]
         page_state["log_index"] = MANAGER.log.count
 
     def refresh_applog() -> None:
@@ -437,8 +486,7 @@ def index() -> None:
             size = log_path.stat().st_size
         except OSError:
             if not page_state.get("applog_missing") and connected():
-                applog.clear()  # type: ignore[union-attr]
-                applog.push("（还没有 app.log；启动流水线后会生成）")  # type: ignore[union-attr]
+                applog.set_lines(["（还没有 app.log；启动流水线后会生成）"])  # type: ignore[union-attr]
                 page_state["applog_missing"] = True
                 page_state["applog_size"] = None
             return
@@ -447,11 +495,7 @@ def index() -> None:
             return
         previous = page_state.get("applog_size")
         if previous is None or size < previous:
-            applog.clear()  # type: ignore[union-attr]
-            for line in tail_file(log_path, 400):
-                if not connected():
-                    return
-                applog.push(line)  # type: ignore[union-attr]
+            applog.set_lines(tail_file(log_path, 400))  # type: ignore[union-attr]
         elif size > previous:
             try:
                 with log_path.open("rb") as fh:
@@ -463,7 +507,24 @@ def index() -> None:
                 if not connected():
                     return
                 applog.push(line)  # type: ignore[union-attr]
+            applog.scroll_to_top()  # type: ignore[union-attr]
         page_state["applog_size"] = size
+
+    def reset_log_views() -> None:
+        """启动新流水线后清空界面上的两处日志，并立即拉取本轮内容。"""
+        if not connected():
+            return
+        live_log = widgets.get("live_log")
+        if live_log is not None:
+            live_log.clear()  # type: ignore[union-attr]
+        page_state["log_index"] = 0
+        applog = widgets.get("applog")
+        if applog is not None:
+            applog.clear()  # type: ignore[union-attr]
+        page_state["applog_size"] = None
+        page_state["applog_missing"] = False
+        pull_logs()
+        refresh_applog()
 
     def timer_status() -> None:
         if connected():
@@ -811,7 +872,7 @@ def index() -> None:
         # -------------------------------------------------------------- 日志
         with ui.tab_panel(log_tab):
             with ui.row().classes("w-full items-center justify-between pt-2"):
-                ui.label("本次运行输出").classes("text-xl font-bold")
+                ui.label("本次运行输出（最新在上）").classes("text-xl font-bold")
                 with ui.row().classes("gap-2"):
                     ui.button(
                         "清空显示",
@@ -826,19 +887,15 @@ def index() -> None:
                         icon="open_in_new",
                         on_click=lambda: _open_path(ROOT / "app.log"),
                     ).props("flat dense")
-            widgets["live_log"] = ui.log(max_lines=2000).classes(
-                "w-full h-72 font-mono text-xs bg-slate-950 text-slate-100 rounded p-3"
-            )
-            for line in MANAGER.log.snapshot(400):
-                widgets["live_log"].push(line)  # type: ignore[union-attr]
+            widgets["live_log"] = ReversedLog(max_lines=2000)
+            widgets["live_log"].set_lines(MANAGER.log.snapshot(400))
 
-            ui.label("app.log（历史）").classes("text-xl font-bold mt-4")
-            ui.label("最多显示最近 400 行；main.py 的日志同时写在仓库根目录的 app.log。").classes(
-                "text-xs text-gray-500"
-            )
-            widgets["applog"] = ui.log(max_lines=600).classes(
-                "w-full h-72 font-mono text-xs bg-slate-950 text-slate-100 rounded p-3"
-            )
+            ui.label("app.log（历史，最新在上）").classes("text-xl font-bold mt-4")
+            ui.label(
+                "最多显示最近 400 行；每次启动流水线会清空本次输出，"
+                "旧 app.log 备份为 app.log.prev。"
+            ).classes("text-xs text-gray-500")
+            widgets["applog"] = ReversedLog(max_lines=600)
 
         # -------------------------------------------------------------- 帮助
         with ui.tab_panel(help_tab):
@@ -865,6 +922,8 @@ def index() -> None:
 ### 注意
 
 - 启动前会删除 `Upload/videos` 里的历史 mp4（与 `start.bat` 一致），防止重复发布。
+- 日志按“最新在上”显示；每次启动流水线会清空本次输出，旧 `app.log` 备份为
+  `app.log.prev`，不会和上一轮业务混在一起。
 - 配置保存后，正在跑的流水线不会热加载；用“保存并重启”。
 - 界面只监听 `127.0.0.1`，默认端口 `8765`；重复双击 `gui.bat` 会直接打开已有页面。
 - 如果又双击了 `start.bat`，界面会检测到外部 `main.py` 并阻止重复启动。

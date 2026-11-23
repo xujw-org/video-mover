@@ -56,6 +56,12 @@ class LogBuffer:
         with self._lock:
             return self._count
 
+    def clear(self) -> None:
+        """清空缓冲并重置序号；界面据此判断进入了新的一轮。"""
+        with self._lock:
+            self._lines.clear()
+            self._count = 0
+
     def snapshot(self, limit: int = 500) -> list[str]:
         with self._lock:
             return list(self._lines)[-limit:]
@@ -217,7 +223,24 @@ class ProcessManager:
         self.log.add(f"[{_now_text()}] ■ {label}{result}（耗时 {duration}）")
 
     # ------------------------------------------------------------------ 流水线
-    def start_main(self, clean_upload: bool = True) -> tuple[bool, str]:
+    def reset_logs(self) -> None:
+        """清空上一轮输出，并把旧 app.log 备份成 app.log.prev。"""
+        self.log.clear()
+        self._exit_code = None
+        log_path = self.root / "app.log"
+        backup = self.root / "app.log.prev"
+        if log_path.is_file():
+            try:
+                log_path.replace(backup)
+                self.log.add(f"[{_now_text()}] 已清空上一轮日志（旧 app.log 备份为 app.log.prev）")
+            except OSError as exc:
+                self.log.add(f"[{_now_text()}] 清理旧日志失败：{exc}")
+        else:
+            self.log.add(f"[{_now_text()}] 已清空上一轮日志")
+
+    def start_main(
+        self, clean_upload: bool = True, reset_logs: bool = True
+    ) -> tuple[bool, str]:
         if self.busy():
             return False, f"已有任务在运行（{self._label}），请先停止。"
         external = self.find_external_main(max_age=0)
@@ -230,6 +253,8 @@ class ProcessManager:
             )
         if not (self.root / "my_apps.yaml").is_file():
             return False, "缺少 my_apps.yaml，请先在“配置”页保存。"
+        if reset_logs:
+            self.reset_logs()
         if clean_upload:
             removed = clean_upload_dir(self.root)
             if removed:

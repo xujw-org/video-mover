@@ -56,6 +56,7 @@ Upload/videos/
 # 上传脚本的发布节奏状态：每次发布写一次时间戳，属于本机运行时数据
 Upload/.last_publish
 app.log
+app.log.prev
 *.log
 # f2 运行时会在当前目录建 sqlite 用户库（抖音已改走浏览器通道，不再需要）
 douyin_users.db

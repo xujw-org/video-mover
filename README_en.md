@@ -151,7 +151,9 @@ opens `http://127.0.0.1:8765/`.
 The panel lets you start/stop the pipeline, edit sources, schedule, upload
 settings, backfill, cookies/proxies, paths and upload scripts, validate the
 config before saving, export the Douyin cookie, run the QR login, download
-assets, and watch both live output and `app.log`.
+assets, and watch both live output and `app.log` (newest lines first). Starting a
+new pipeline clears the current-run output and backs up the old `app.log` as
+`app.log.prev`.
 
 Notes:
 
