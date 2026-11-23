@@ -766,15 +766,39 @@ def cmd_update(args: argparse.Namespace) -> int:
         if not remote_ok:
             say("[警告] origin 修改失败，将直接按完整地址拉取。")
 
+    code, status_out = run_captured(["git", "status", "--porcelain"])
+    dirty = status_out.strip() if code == 0 else ""
+    stashed = False
+    if dirty:
+        files = dirty.splitlines()
+        say("检测到未提交修改：")
+        for line in files[:10]:
+            say(f"  {line}")
+        if len(files) > 10:
+            say(f"  ... 还有 {len(files) - 10} 项")
+        if not getattr(args, "autostash", True):
+            say()
+            say("[错误] 已停止更新，避免覆盖本机改动。")
+            say('保留并更新：git stash push -u -m "before-update"')
+            say("             然后重新运行 update.bat，成功后 git stash pop")
+            return 1
+        say("先自动暂存，更新成功后会恢复（失败时留在 git stash）。")
+        if run(["git", "stash", "push", "-u", "-m", "video-mover update autostash"]) != 0:
+            say("[错误] git stash 失败，已停止更新。")
+            return 1
+        stashed = True
+
     pull_cmd = ["git", "pull", "--ff-only"]
     pull_cmd += ["origin", "main"] if remote_ok else [CANONICAL_REMOTE, "main"]
     say(f"拉取：{' '.join(pull_cmd)}")
     if run(pull_cmd) != 0:
         say()
-        say("[错误] git pull 失败，未继续更新依赖。常见原因：")
-        say("  - 本机还有未提交的修改：先 git status 查看并处理；")
-        say("  - 本地分支和远端分叉：需要先合并或变基；")
-        say("  - 网络或账号凭据问题。")
+        say("[错误] git pull 失败，未继续更新依赖。")
+        if stashed:
+            say("       本机修改仍在 git stash 中：git stash list")
+            say("       确认后用 git stash pop 恢复。")
+        else:
+            say("       常见原因：本地修改冲突、分支分叉、网络或账号凭据问题。")
         return 1
 
     say()
@@ -787,12 +811,20 @@ def cmd_update(args: argparse.Namespace) -> int:
         args.env,
     ]
     if run(setup_cmd) != 0:
+        if stashed:
+            say("本机修改仍在 git stash 中：git stash list；确认后用 git stash pop 恢复。")
         return 1
 
     say()
     say("补下缺失的大二进制资产（已有的会跳过）...")
     if run([str(interpreter), str(ROOT / "scripts" / "download_assets.py")]) != 0:
         say("[警告] 资产下载失败；可以稍后在图形界面点“下载素材”重试。")
+
+    if stashed:
+        say()
+        say("恢复本机未提交修改 ...")
+        if run(["git", "stash", "pop"]) != 0:
+            say("[警告] 自动恢复失败；修改仍在 git stash，请手动执行 git stash pop 并解决冲突。")
 
     say()
     say("=" * 62)
@@ -837,6 +869,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_update = sub.add_parser("update", help="拉取最新代码并更新依赖、补丁和素材")
     p_update.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
+    p_update.add_argument(
+        "--no-autostash",
+        dest="autostash",
+        action="store_false",
+        default=True,
+        help="有未提交修改时直接停止，不自动 stash/恢复",
+    )
     p_update.set_defaults(func=cmd_update)
     return parser
 

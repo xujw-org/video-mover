@@ -188,8 +188,13 @@ branches. If an old clone's `origin` points elsewhere, it is rewritten to
 `https://git.xujw.top/xujinwen/video-mover.git` before pulling, so a stale remote
 cannot make `update.bat` silently keep old code.
 
-If the pull fails because of local modifications, divergent branches or network
-problems, the script stops immediately and does not touch dependencies.
+Uncommitted changes are auto-stashed with `git stash push -u` and restored with
+`git stash pop` after a successful update. If the pull or setup fails, the
+changes stay in the stash and the script prints the recovery command. Use
+`python scripts/win_env.py update --no-autostash` to stop instead.
+
+If the pull fails because of divergent branches, network or credential problems,
+the script stops immediately and does not touch dependencies.
 Start with `gui.bat` or `start.bat` afterwards.
 
 `my_apps.yaml`, `.env` and `Upload/cookies/` are local files and are not updated

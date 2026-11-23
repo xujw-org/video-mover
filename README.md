@@ -290,7 +290,11 @@ base；三者都没有时会用 `scripts/bootstrap_python.ps1` 自动安装 Pyth
 如果旧克隆的 `origin` 不是 `https://git.xujw.top/xujinwen/video-mover.git`，
 脚本会先改正 `origin` 再拉取，避免“update.bat 跑完还是旧代码”。
 
-如果 pull 因为本机有未提交修改、分支分叉或网络问题失败，脚本会立即停下并提示，
+检测到未提交修改时会先自动 `git stash push -u`，更新成功后自动 `git stash pop`；
+如果拉取或安装失败，修改会留在 stash 里，脚本会提示手动恢复。不想自动暂存可以执行
+`python scripts/win_env.py update --no-autostash`。
+
+如果 pull 因为分支分叉、网络或账号凭据问题失败，脚本会立即停下并提示，
 不会继续改依赖。更新完成后用 `gui.bat` 或 `start.bat` 启动。
 
 注意：`my_apps.yaml`、`.env`、`Upload/cookies/` 都是本机文件，不会被 `git pull`

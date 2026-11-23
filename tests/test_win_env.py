@@ -105,12 +105,15 @@ def _mock_update_git(
     branch="main",
     origin=win_env.CANONICAL_REMOTE,
     remote_set_ok=True,
+    dirty="",
 ):
     def fake_captured(cmd):
         if cmd[:3] == ["git", "rev-parse", "--abbrev-ref"]:
             return 0, f"{branch}\n"
         if cmd[:3] == ["git", "remote", "get-url"]:
             return 0, f"{origin}\n"
+        if cmd[:2] == ["git", "status"]:
+            return 0, dirty
         return 0, ""
 
     def fake_run(cmd):
@@ -168,6 +171,39 @@ def test_update_requires_main_branch(monkeypatch):
     calls = _mock_update_git(monkeypatch, branch="dev")
     assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
     assert calls == []
+
+
+def test_update_autostashes_and_restores_dirty_tree(monkeypatch):
+    calls = _mock_update_git(monkeypatch, dirty=" M gui.py\n?? notes.txt\n")
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 0
+    assert calls[0] == [
+        "git",
+        "stash",
+        "push",
+        "-u",
+        "-m",
+        "video-mover update autostash",
+    ]
+    assert calls[-1] == ["git", "stash", "pop"]
+    assert ["git", "pull", "--ff-only", "origin", "main"] in calls
+
+
+def test_update_can_refuse_autostash(monkeypatch):
+    calls = _mock_update_git(monkeypatch, dirty=" M gui.py\n")
+    assert win_env.cmd_update(SimpleNamespace(env="dy", autostash=False)) == 1
+    assert calls == []
+
+
+def test_update_keeps_stash_when_pull_fails(monkeypatch):
+    calls = _mock_update_git(monkeypatch, dirty=" M gui.py\n")
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        return 0 if cmd[:2] == ["git", "stash"] and cmd[2] == "push" else 1
+
+    monkeypatch.setattr(win_env, "run", fake_run)
+    assert win_env.cmd_update(SimpleNamespace(env="dy")) == 1
+    assert ["git", "stash", "pop"] not in calls
 
 
 # --------------------------------------------------------------------------
