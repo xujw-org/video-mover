@@ -18,11 +18,13 @@
 
     python scripts/win_env.py setup  [--env NAME] [--with-assets]
     python scripts/win_env.py run    [--env NAME] [--dry-run]
+    python scripts/win_env.py gui    [--env NAME]
     python scripts/win_env.py check  [--env NAME]
 
   setup  确认环境（缺失时自动创建 conda 环境或 .venv）→ 安装依赖、装 Playwright
          浏览器、打上游补丁；Python 解释器本身由 setup.bat 负责装
   run    清理待上传目录并启动 main.py
+  gui    启动 NiceGUI 图形控制台（缺依赖时自动安装 requirements-gui.txt）
   check  只检查不修改：解释器、依赖、ffmpeg、Playwright 浏览器、补丁、资产
 """
 
@@ -310,6 +312,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     if missing:
         say(f"  缺失的包：{', '.join(missing)}（运行 setup.bat 安装）")
 
+    code, _ = run_captured([str(interpreter), "-c", "import nicegui"])
+    say(f"  nicegui      {'OK' if code == 0 else '未安装（gui.bat 会自动安装）'}")
+
     say()
     say("外部工具：")
     for tool in ("ffmpeg", "ffprobe"):
@@ -543,7 +548,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     say(f"解释器  ：{interpreter}")
     say("=" * 62)
 
-    total = 7
+    total = 8
     step(1, total, "升级 pip")
     if run([str(interpreter), "-m", "pip", "install", "--upgrade", "pip"]) != 0:
         return _fail()
@@ -560,15 +565,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if run([str(interpreter), "-m", "pip", "install", "-r", "requirements-dev.txt"]) != 0:
         return _fail()
 
-    step(5, total, "安装 Playwright 浏览器（chromium / firefox）")
+    step(5, total, "安装图形界面依赖 requirements-gui.txt（NiceGUI，已与 f2 版本对齐）")
+    if run([str(interpreter), "-m", "pip", "install", "-r", "requirements-gui.txt"]) != 0:
+        return _fail()
+
+    step(6, total, "安装 Playwright 浏览器（chromium / firefox）")
     if run([str(interpreter), "-m", "playwright", "install", "chromium", "firefox"]) != 0:
         return _fail()
 
-    step(6, total, "应用上游兼容补丁（f2 等，详见 PATCHES.md）")
+    step(7, total, "应用上游兼容补丁（f2 等，详见 PATCHES.md）")
     if run([str(interpreter), str(ROOT / "scripts" / "apply_upstream_patches.py")]) != 0:
         return _fail()
 
-    step(7, total, "准备 ffmpeg（PATH 中没有就自动下载到 tools\\ffmpeg）")
+    step(8, total, "准备 ffmpeg（PATH 中没有就自动下载到 tools\\ffmpeg）")
     if ensure_ffmpeg() is None:
         say("  （后续视频处理步骤会失败；本步不算安装失败）")
 
@@ -584,9 +593,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if not args.with_assets:
         say("  1) 首次运行前下载大二进制资产：")
         say(f'       "{interpreter}" scripts\\download_assets.py')
-    say("  2) 生成配置文件（缺失会打警告并用默认值）：")
+    say("  2) 生成配置文件（缺失会自动从模板创建）：")
     say("       copy my_apps.yaml.example my_apps.yaml")
-    say(f"  3) 启动：start.bat {args.env}")
+    say(f"  3) 打开图形界面：gui.bat {args.env}")
+    say(f"     或命令行启动：start.bat {args.env}")
     say("=" * 62)
     return 0
 
@@ -676,6 +686,49 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 130
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    """启动 NiceGUI 控制台；缺依赖时自动安装 requirements-gui.txt。"""
+    interpreter = require_interpreter(args.env)
+    say(f"使用解释器：{interpreter}")
+
+    code, out = run_captured(
+        [
+            str(interpreter),
+            "-c",
+            "import nicegui, pydantic, websockets;"
+            "print(nicegui.__version__, pydantic.__version__, websockets.__version__)",
+        ]
+    )
+    versions = out.split() if code == 0 else []
+    compatible = (
+        len(versions) == 3
+        and versions[0] == "2.24.2"
+        and versions[1].startswith("2.9.")
+        and int(versions[2].split(".")[0]) < 13
+    )
+    if not compatible:
+        say()
+        say("操作界面依赖缺失或版本与 f2 冲突，正在安装 requirements-gui.txt ...")
+        say("（这组版本特意与 f2 锁定的 pydantic 2.9 / websockets<13 保持兼容）")
+        if run([str(interpreter), "-m", "pip", "install", "-r", "requirements-gui.txt"]) != 0:
+            return _fail()
+
+    env = env_with_scripts(interpreter)
+    env["VIDEO_MOVER_GUI_ENV"] = args.env
+    say(f"启动操作界面（环境：{args.env}）")
+    say("-" * 62)
+    try:
+        return subprocess.run(
+            [str(interpreter), str(ROOT / "gui.py")],
+            cwd=str(ROOT),
+            env=env,
+        ).returncode
+    except KeyboardInterrupt:
+        say()
+        say("已中断，正在退出。")
+        return 130
+
+
 # --------------------------------------------------------------------------
 # 入口
 # --------------------------------------------------------------------------
@@ -704,6 +757,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_check = sub.add_parser("check", help="只检查不修改")
     p_check.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
     p_check.set_defaults(func=cmd_check)
+
+    p_gui = sub.add_parser("gui", help="启动图形操作界面（NiceGUI，浏览器打开）")
+    p_gui.add_argument("--env", default=DEFAULT_ENV, help="conda 环境名，默认 dy")
+    p_gui.set_defaults(func=cmd_gui)
     return parser
 
 

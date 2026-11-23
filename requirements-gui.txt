@@ -1,0 +1,14 @@
+# Video Mover GUI 依赖（NiceGUI 2.x）
+#
+# 为什么不装最新版 NiceGUI：运行依赖里的 f2==0.0.1.7 把 pydantic 钉在
+# 2.9.*、websockets 钉在 <13.0；NiceGUI 3.x/4.x 要求更新的 pydantic-core 和
+# websockets，会把 f2 弄坏（TikTok 抓取和 flush_device_id 都依赖 f2）。
+# 下面这一组是实测与 f2 共存、pip check 无冲突的组合。
+#
+# 安装：python -m pip install -r requirements-gui.txt（gui.bat 会自动执行）
+nicegui==2.24.2
+fastapi==0.116.2
+starlette==0.47.3
+pydantic==2.9.2
+uvicorn==0.35.0
+websockets==12.0

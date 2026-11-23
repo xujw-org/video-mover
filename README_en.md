@@ -141,6 +141,26 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 
    See [ASSETS.md](./ASSETS.md).
 
+### GUI (recommended)
+
+If you do not want to edit YAML or type commands, double-click `gui.bat` (or
+`gui.bat ENV_NAME`). The first run installs `requirements-gui.txt` (NiceGUI 2.x,
+pinned to stay compatible with f2's `pydantic==2.9.*` and `websockets<13`) and
+opens `http://127.0.0.1:8765/`.
+
+The panel lets you start/stop the pipeline, edit sources, schedule, upload
+settings, backfill, cookies/proxies, paths and upload scripts, validate the
+config before saving, export the Douyin cookie, run the QR login, download
+assets, and watch both live output and `app.log`.
+
+Notes:
+
+- It listens on `127.0.0.1` only; launching `gui.bat` again opens the existing page.
+- Saved config is not hot-reloaded; use “Save & Restart”.
+- Starting from the GUI clears historical mp4s in `Upload/videos`, same as `start.bat`.
+- Closing the launcher console stops the pipeline. `start.bat` and `python main.py`
+  still work and read the same `my_apps.yaml`.
+
 ### Configuration
 
 1. Configure input folders, target platforms, account files, proxy settings, and schedules in `my_apps.yaml`.
@@ -149,7 +169,8 @@ Core technologies: Python, FFmpeg, OpenCV, Playwright, Watchdog, APScheduler, an
 
 ### Run
 
-Double-click `start.bat` (or `start.bat env-name` from a shell), or execute directly:
+Double-click `gui.bat` (GUI, recommended; see “GUI” above), or `start.bat`
+(or `start.bat env-name` from a shell), or execute directly:
 
 ```bash
 python main.py

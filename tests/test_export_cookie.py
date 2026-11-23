@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +47,11 @@ def test_load_web_cookie(tmp_path):
     with pytest.raises(ValueError):
         export_cookie.load_web_cookie(empty)
 
+    placeholder = tmp_path / "placeholder.yaml"
+    placeholder.write_text("douyin:\n  cookie: 'YOUR_DOYIN_COOKIE_HERE'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="模板占位符"):
+        export_cookie.load_web_cookie(placeholder)
+
     with pytest.raises(FileNotFoundError):
         export_cookie.load_web_cookie(tmp_path / "nope.yaml")
 
@@ -64,8 +70,18 @@ def test_sid_issued_at_reads_second_field():
     assert export_cookie.sid_issued_at({"sid_guard": "abc|notanumber|1|x"}) == 0
 
 
+def _write_cookie_config(tmp_path: Path) -> Path:
+    config = tmp_path / "my_apps.yaml"
+    config.write_text(
+        'douyin:\n  cookie: "sessionid=old; ttwid=t; '
+        'sid_guard=oldsig|1000000000|5184000|Wed%2C+13-Jan-2027"\n',
+        encoding="utf-8",
+    )
+    return config
+
+
 def test_export_refuses_to_clobber_newer_session(tmp_path, capsys):
-    config = REPO_ROOT / "my_apps.yaml"
+    config = _write_cookie_config(tmp_path)
     output = tmp_path / "douyin_default.json"
     # 输出文件里的 session 是新的（签发时间更晚）
     newer = _state_with(
@@ -82,7 +98,7 @@ def test_export_refuses_to_clobber_newer_session(tmp_path, capsys):
 
 
 def test_export_overwrites_with_force(tmp_path):
-    config = REPO_ROOT / "my_apps.yaml"
+    config = _write_cookie_config(tmp_path)
     output = tmp_path / "douyin_default.json"
     newer = _state_with(
         ("sessionid", "new"), ("ttwid", "t"),

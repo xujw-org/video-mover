@@ -30,7 +30,7 @@ win_env = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(win_env)
 
 EXE_NAME = "python.exe" if os.name == "nt" else "python"
-BAT_FILES = ["setup.bat", "start.bat"]
+BAT_FILES = ["setup.bat", "start.bat", "gui.bat"]
 
 
 # --------------------------------------------------------------------------
@@ -82,6 +82,13 @@ def test_setup_flags():
 def test_run_flags():
     args = win_env.build_parser().parse_args(["run", "--dry-run"])
     assert args.dry_run is True
+
+
+def test_gui_flags():
+    args = win_env.build_parser().parse_args(["gui", "--env", "py312"])
+    assert args.env == "py312"
+    assert args.command == "gui"
+    assert args.func is win_env.cmd_gui
 
 
 # --------------------------------------------------------------------------
@@ -429,4 +436,4 @@ def test_help_runs():
     )
     assert proc.returncode == 0
     out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
-    assert "setup" in out and "run" in out and "check" in out
+    assert "setup" in out and "run" in out and "check" in out and "gui" in out

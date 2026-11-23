@@ -168,9 +168,34 @@ Content input
 
    详见 [ASSETS.md](./ASSETS.md)。
 
+### 图形界面（推荐）
+
+不想手改 YAML、也不想记命令时，双击 `gui.bat`（或 `gui.bat 环境名`）。第一次启动会
+自动安装 `requirements-gui.txt`（NiceGUI 2.x；版本特意与 f2 锁定的
+`pydantic==2.9.*` / `websockets<13` 对齐），然后自动打开浏览器：
+`http://127.0.0.1:8765/`。
+
+界面里可以：
+
+- 启动 / 停止流水线；停止时先发 Ctrl+Break 让 `main.py` 自己收尾，超时才杀进程树。
+- 用表单改视频源、调度、上传账号、补抓、Cookie / 代理、路径和上传脚本。
+- 保存前先让 `main.py` 校验配置，错误会直接显示原因，不会写坏 YAML。
+- 一键导出 Cookie / 扫码登录 / 下载素材 / 修复环境。
+- 看本次运行的实时输出和 `app.log`。
+- 开跑前检查：配置、Cookie、上传登录态、ffmpeg、Playwright、素材。
+
+注意事项：
+
+- 界面只监听本机 `127.0.0.1`，默认端口 8765；重复双击 `gui.bat` 会直接打开已有页面。
+- 配置保存后，正在跑的流水线不会热加载；用界面里的“保存并重启”。
+- 启动前会清空 `Upload/videos` 里的历史 mp4（与 `start.bat` 一致，防止重复发布）。
+- 关掉启动 `gui.bat` 的控制台窗口会停止流水线；想脱离窗口运行仍可用 `start.bat`。
+- 命令行方式 `start.bat` / `python main.py` 仍然可用，读的是同一份 `my_apps.yaml`。
+
 ### 配置
 
-1. 复制配置模板并填入你自己的值：
+1. 推荐直接双击 `gui.bat` 在界面里填写（缺失的 `my_apps.yaml` 会自动从模板创建）；
+   也可以手动复制模板并编辑：
 
    ```bash
    cp my_apps.yaml.example my_apps.yaml
@@ -249,7 +274,8 @@ Content input
 
 ### 运行
 
-双击 `start.bat`（或在命令行 `start.bat 环境名`），也可以直接执行：
+双击 `gui.bat`（图形界面，推荐；见上文“图形界面”），或双击 `start.bat`
+（或在命令行 `start.bat 环境名`），也可以直接执行：
 
 ```bash
 python main.py

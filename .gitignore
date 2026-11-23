@@ -41,6 +41,8 @@ ENV/
 # my_apps.yaml 是本机实际配置（从 my_apps.yaml.example 复制后填写），不进仓库；
 # 仓库里只保留脱敏的 my_apps.yaml.example。
 my_apps.yaml
+my_apps.yaml.bak
+my_apps.yaml.tmp
 cookies/
 *.cookie
 account.json

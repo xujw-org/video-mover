@@ -42,6 +42,11 @@ def load_web_cookie(config_path: Path) -> str:
     cookie = str((data.get("douyin") or {}).get("cookie") or "").strip()
     if not cookie:
         raise ValueError(f"{config_path} 里的 douyin.cookie 是空的")
+    if cookie == "YOUR_DOYIN_COOKIE_HERE":
+        raise ValueError(
+            f"{config_path} 里的 douyin.cookie 还是模板占位符，"
+            "请从浏览器开发者工具复制真实 Cookie 后再导出"
+        )
     return cookie
 
 
